@@ -1,0 +1,60 @@
+# Environment variables and sensitive data
+.env
+config.py
+
+# Database files
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Chrome profiles and session data
+chrome_profile/
+chrome_profile*/
+test_profile*/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+venv/
+ENV/
+env/
+
+# Logs
+*.log
+logs/*.log
+bot*.log
+
+# QR codes (may contain session info)
+qr_code.png
+*.png
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Backup files
+*_backup_*
+*.bak
