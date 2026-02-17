@@ -59,6 +59,9 @@ class Config:
         MAX_GROUP_SIZE = _config.MAX_GROUP_SIZE
         DB_PATH = _config.DB_PATH
         CHROME_RESTART_HOURS = _config.CHROME_RESTART_HOURS
+        DEFAULT_START_TIME = _config.DEFAULT_START_TIME
+        DEFAULT_INTERVAL_MINUTES = _config.DEFAULT_INTERVAL_MINUTES
+        DEFAULT_NUM_SLOTS = _config.DEFAULT_NUM_SLOTS
     except (ImportError, AttributeError) as e:
         # Use safe defaults if config.py doesn't exist
         print("⚠️  Warning: config.py not found. Please copy config.example.py to config.py")
@@ -69,6 +72,9 @@ class Config:
         ADMIN_USERS = ["CONFIGURE_ME"]
         NAME_MAPPING = {}
         MAX_GROUP_SIZE = 4
+        DEFAULT_START_TIME = "08:00"
+        DEFAULT_INTERVAL_MINUTES = 8
+        DEFAULT_NUM_SLOTS = 10
         DB_PATH = "golf_swindle.db"
         CHROME_RESTART_HOURS = 24
 
@@ -143,11 +149,11 @@ class Database:
         # Initialize default tee time settings if none exist
         cursor.execute("SELECT COUNT(*) FROM tee_time_settings WHERE active = 1")
         if cursor.fetchone()[0] == 0:
-            # Default: 8:00am start, 8-minute intervals, 10 slots
+            # Default: Read from Config
             cursor.execute("""
                 INSERT INTO tee_time_settings (start_time, interval_minutes, num_slots, active)
-                VALUES ('08:00', 8, 10, 1)
-            """)
+                VALUES (?, ?, ?, 1)
+            """, (Config.DEFAULT_START_TIME, Config.DEFAULT_INTERVAL_MINUTES, Config.DEFAULT_NUM_SLOTS))
 
         # Manual tee times table (for adding specific times)
         cursor.execute("""
@@ -2020,9 +2026,21 @@ class SwindleBot:
         return '\n'.join(lines)
 
     def clear_weekly_data(self):
-        """Clear data for new week"""
+        """Clear data for new week (Monday 00:01)"""
         print("⏰ Clearing data for new week...")
         self.db.clear_participants()
+        self.db.clear_time_preferences()
+        self.db.clear_manual_tee_times()
+        print("✅ Weekly reset complete:")
+        print("   - Participants cleared")
+        print("   - Time preferences cleared (early/late)")
+        print("   - Manual tee time modifications cleared")
+        print("   - Partner preferences kept (season-long)")
+        print("   - Tee time settings kept (season-long)")
+
+        # Send notification to admin group
+        message = "🔄 WEEKLY RESET\n\nNew week started!\n\n✅ Cleared:\n- Participants\n- Time preferences\n- Tee time modifications\n\n🔒 Kept:\n- Partner preferences\n- Tee time settings"
+        self.send_to_admin_group(message)
 
     def send_health_check(self):
         """Send health check"""
@@ -2048,9 +2066,13 @@ class SwindleBot:
             "Remove [Name]",
             "[Name] plays with [Name]",
             "[Name] prefers early/late",
-            "Set tee times from [HH:MM]"
+            "Set tee times from [HH:MM]",
+            "Add tee time [HH:MM]",
+            "Remove tee time [HH:MM]",
+            "Clear tee times",
+            "Clear time preferences"
         ]
-        admin_msg = f"Admin Interface Ready (Phase 4)\n\nBot started at {now.strftime('%H:%M')}\n\nCommands:\n" + "\n".join(f"- {cmd}" for cmd in commands)
+        admin_msg = f"Admin Interface Ready (Phase 4.5)\n\nBot started at {now.strftime('%H:%M')}\n\nCommands:\n" + "\n".join(f"- {cmd}" for cmd in commands)
         self.send_to_admin_group(admin_msg)
 
     def send_daily_update(self):
