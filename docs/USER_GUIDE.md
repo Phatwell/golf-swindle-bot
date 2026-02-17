@@ -139,7 +139,7 @@ Remove avoidance for Alex
 
 ### ⏰ Configure Tee Times
 
-**Set tee time settings:**
+**Set tee time settings (auto-generation):**
 ```
 Set tee times from 8:00
 ```
@@ -149,6 +149,21 @@ You can be more specific:
 ```
 Configure tee times starting at 8am with 8 minute intervals
 ```
+
+**Manage individual tee times (additive):**
+
+The bot starts with auto-generated times, then you can add or remove specific times:
+
+```
+Add tee time 09:00           # Add specific time to the list
+Remove tee time 08:32        # Remove specific time from the list
+Clear tee times              # Reset to pure auto-generation
+```
+
+**Example:**
+- Auto-generated: 08:24, 08:32, 08:40, 08:48, 08:56, 09:04, 09:12
+- `Add tee time 09:20` → 08:24, 08:32, 08:40, 08:48, 08:56, 09:04, 09:12, 09:20
+- `Remove tee time 08:40` → 08:24, 08:32, 08:48, 08:56, 09:04, 09:12, 09:20
 
 ---
 
@@ -332,6 +347,61 @@ Otherwise, leave them active all season!
 
 ---
 
+## 📅 Season-Long vs Weekly Preferences
+
+### What Persists All Season? (Set Once, Use Forever)
+
+**Partner Preferences:**
+```
+Lloyd plays with Segan
+Mike plays with John
+```
+✅ Set at the start of the season
+✅ Automatically applied every week
+✅ Never need to re-enter
+✅ Only remove if partnerships change
+
+**Avoidances:**
+```
+Don't pair Mike with John
+```
+✅ Set once, persist forever
+✅ Only remove if situation changes
+
+**Tee Time Settings (Auto-Generation):**
+```
+Start: 08:24, Interval: 8min, Slots: 7
+```
+✅ Set once, used every week
+✅ Only change if booking changes
+
+### What Resets Each Week? (Must Set Fresh)
+
+**Time Preferences:**
+```
+Mike prefers early
+Dave wants late tee time
+```
+🔄 Reset automatically each week
+🔄 Must be set again if needed
+🔄 Why? Players' availability changes week-to-week
+
+**Tee Time Modifications:**
+```
+Add tee time 09:00
+Remove tee time 08:32
+```
+🔄 Reset each week to start fresh
+🔄 Why? Available times change week-to-week
+
+**To Start a New Week:**
+```
+Clear time preferences    # Clears early/late (keeps partner prefs!)
+Clear tee times          # Resets to auto-generation
+```
+
+---
+
 ## Tips & Best Practices
 
 ### ✅ Do's
@@ -389,6 +459,14 @@ Contact your bot administrator - the person who receives all bot messages
 | Set time pref | `Mike prefers early` |
 | Show settings | `Show tee times` |
 | Show constraints | `Show constraints` |
+| Add tee time | `Add tee time 09:00` |
+| Remove tee time | `Remove tee time 08:32` |
+| Clear tee times | `Clear tee times` |
+| Clear time prefs | `Clear time preferences` |
+| Add tee time | `Add tee time 09:00` |
+| Remove tee time | `Remove tee time 08:32` |
+| Clear tee times | `Clear tee times` |
+| Clear time prefs | `Clear time preferences` |
 
 ---
 

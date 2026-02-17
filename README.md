@@ -21,10 +21,12 @@ An intelligent WhatsApp bot that automates weekly golf tee sheet management. The
 - **Persistent preferences**: Set partner preferences once, applied every week
 
 ### ⏰ Dynamic Tee Time Assignment
+- **Additive tee time management**: Start with auto-generated times, then add/remove specific times
 - Configurable start times and intervals
 - Preference-based assignment (early birds vs late starters)
 - Calculates unused slots to return to the course
 - Actual tee times in tee sheet (e.g., 8:00am, 8:08am, 8:16am)
+- **Weekly time preferences**: Reset each week (partner preferences persist)
 
 ### 📱 Admin Control via WhatsApp
 - Fast 1-minute response time for admin commands
@@ -151,6 +153,18 @@ Set tee times from 8:00                        # Use defaults
 Configure tee times starting at 8am with 8 minute intervals
 ```
 
+**Manage individual tee times (additive):**
+```
+Add tee time 09:00           # Add specific time to auto-generated list
+Remove tee time 08:32        # Remove specific time from list
+Clear tee times              # Reset to pure auto-generation
+```
+
+**Weekly time preferences:**
+```
+Clear time preferences       # Clear early/late for new week (keeps partner prefs)
+```
+
 **Remove preferences:**
 ```
 Remove Mike's partner preference
@@ -226,9 +240,10 @@ NAME_MAPPING = {
 ### Database
 
 - SQLite database stored in `data/` directory
-- Tables: `participants`, `constraints`, `tee_time_settings`, `last_snapshot`
+- Tables: `participants`, `constraints`, `tee_time_settings`, `manual_tee_times`, `removed_tee_times`, `last_snapshot`
 - Automatically created on first run
 - Backs up Chrome profile every session
+- **Additive tee times**: Combines auto-generated times with manual additions/removals
 
 ---
 
@@ -355,6 +370,29 @@ git check-ignore config.py .env     # Should show both files
 - Preference-based time assignment
 - Unused slot tracking
 - Admin commands for configuration
+
+---
+
+## 📅 Preference Types: Season-Long vs Weekly
+
+### Season-Long (Persist Forever)
+These are set once and automatically applied every week:
+- ✅ **Partner preferences**: "Lloyd plays with Segan"
+- ✅ **Avoidances**: "Don't pair Mike with John"
+- ✅ **Tee time settings**: Auto-generation configuration
+
+### Weekly (Reset Each Week)
+These must be set fresh each week:
+- 🔄 **Time preferences**: "Mike prefers early"
+- 🔄 **Tee time modifications**: Added/removed specific times
+
+**Why?** Players' time preferences change week-to-week, but playing partnerships are consistent all season!
+
+**Admin commands:**
+```
+Clear time preferences    # Reset early/late for new week
+Clear tee times          # Reset tee time modifications
+```
 
 ---
 

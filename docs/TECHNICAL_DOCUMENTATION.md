@@ -134,6 +134,30 @@ CREATE TABLE last_snapshot (
 
 **Purpose**: Change detection - only notify when the player list actually changes.
 
+### `manual_tee_times` Table (Phase 4.5)
+```sql
+CREATE TABLE manual_tee_times (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tee_time TEXT NOT NULL UNIQUE,     -- e.g., "09:00"
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+)
+```
+
+**Purpose**: Store manually added tee times (additive to auto-generated times).
+
+### `removed_tee_times` Table (Phase 4.5)
+```sql
+CREATE TABLE removed_tee_times (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tee_time TEXT NOT NULL UNIQUE,     -- e.g., "08:32"
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+)
+```
+
+**Purpose**: Store removed tee times (subtracted from auto-generated times).
+
+**Additive Logic**: `Final Times = Auto-Generated + Manual - Removed`
+
 ---
 
 ## Scheduled Jobs
@@ -332,8 +356,9 @@ NAME_MAPPING = {
 **Supported Commands**:
 - **Phase 1**: `show_list`, `show_tee_sheet`
 - **Phase 2**: `add_player`, `remove_player`, `add_guest`, `remove_guest`
-- **Phase 3**: `set_partner_preference`, `set_avoidance`, `show_constraints`
+- **Phase 3**: `set_partner_preference`, `set_avoidance`, `show_constraints`, `remove_partner_preference`, `remove_avoidance`
 - **Phase 4**: `set_tee_times`, `show_tee_times`, `set_time_preference`
+- **Phase 4.5**: `add_tee_time`, `remove_tee_time`, `clear_tee_times`, `clear_time_preferences`
 
 **Natural Language Examples**:
 - "Show list" → `show_list`
@@ -571,6 +596,60 @@ Bot prints detailed logs to console:
 
 ---
 
+## Important Design Decisions
+
+### Preference Persistence
+
+**Season-Long (Persist Forever)**:
+- Partner preferences (`constraints` table with `constraint_type='partner_preference'`)
+- Avoidances (`constraints` table with `constraint_type='avoid'`)
+- Tee time settings (`tee_time_settings` table)
+
+**Weekly (Reset Each Week)**:
+- Time preferences (`participants.preferences` field - cleared with `clear_time_preferences()`)
+- Tee time modifications (`manual_tee_times` and `removed_tee_times` - cleared with `clear_tee_times()`)
+
+**Rationale**: Partner preferences are consistent all season, but time availability changes week-to-week.
+
+### Additive Tee Time System
+
+**Implementation**:
+```python
+def generate_tee_times(self) -> List[str]:
+    # 1. Generate base times from settings
+    tee_times = generate_from_settings()
+
+    # 2. Add manually added times
+    tee_times.update(get_manual_tee_times())
+
+    # 3. Remove manually removed times
+    tee_times.difference_update(get_removed_tee_times())
+
+    # 4. Sort and return
+    return sorted(tee_times)
+```
+
+**Benefits**:
+- Start with auto-generated times (convenience)
+- Add specific times as needed (flexibility)
+- Remove times that are unavailable (accuracy)
+- Clear all modifications to reset (simplicity)
+
+### New Database Methods
+
+**Tee Time Management**:
+- `add_manual_tee_time(time_str)` - Add specific time
+- `remove_manual_tee_time(time_str)` - Remove specific time (from both manual and auto-generated)
+- `get_manual_tee_times()` - Get all manually added times
+- `get_removed_tee_times()` - Get all removed times
+- `clear_manual_tee_times()` - Clear both additions and removals
+
+**Preference Management**:
+- `clear_time_preferences()` - Clear early/late from all participants (keeps partner prefs)
+- `clear_participants()` - Clear all participants AND time preferences
+
+---
+
 **Last Updated**: February 2026
-**Version**: 5.0 (Phases 1-4 Complete)
+**Version**: 5.1 (Phases 1-4 Complete + Additive Tee Times + Weekly Time Prefs)
 **Author**: Golf Swindle Bot Development Team

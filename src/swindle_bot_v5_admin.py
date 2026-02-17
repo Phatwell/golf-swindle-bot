@@ -37,13 +37,29 @@ class Config:
     To set up: Copy config.example.py to config.py and update with your details
     """
 
+    # Settings that don't contain sensitive data
+    MIN_GROUP_SIZE = 3
+    USER_DATA_DIR = "./chrome_profile"
+    ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")  # Always from environment variable
+
     # Try to import from config.py (user's personal config)
+    # Add project root to path to find config.py
+    import sys
+    _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _project_root not in sys.path:
+        sys.path.insert(0, _project_root)
+
     try:
-        from config import (
-            GROUP_NAME, ADMIN_GROUP_NAME, MY_NUMBER, ADMIN_USERS,
-            NAME_MAPPING, MAX_GROUP_SIZE, DB_PATH, CHROME_RESTART_HOURS
-        )
-    except ImportError:
+        import config as _config
+        GROUP_NAME = _config.GROUP_NAME
+        ADMIN_GROUP_NAME = _config.ADMIN_GROUP_NAME
+        MY_NUMBER = _config.MY_NUMBER
+        ADMIN_USERS = _config.ADMIN_USERS
+        NAME_MAPPING = _config.NAME_MAPPING
+        MAX_GROUP_SIZE = _config.MAX_GROUP_SIZE
+        DB_PATH = _config.DB_PATH
+        CHROME_RESTART_HOURS = _config.CHROME_RESTART_HOURS
+    except (ImportError, AttributeError) as e:
         # Use safe defaults if config.py doesn't exist
         print("⚠️  Warning: config.py not found. Please copy config.example.py to config.py")
         print("⚠️  Using placeholder values - bot will not work until config.py is created")
@@ -55,11 +71,6 @@ class Config:
         MAX_GROUP_SIZE = 4
         DB_PATH = "golf_swindle.db"
         CHROME_RESTART_HOURS = 24
-
-    # Settings that don't contain sensitive data
-    MIN_GROUP_SIZE = 3
-    USER_DATA_DIR = "./chrome_profile"
-    ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")  # Always from environment variable
 
 
 # ==================== DATABASE ====================
@@ -138,6 +149,24 @@ class Database:
                 VALUES ('08:00', 8, 10, 1)
             """)
 
+        # Manual tee times table (for adding specific times)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS manual_tee_times (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tee_time TEXT NOT NULL UNIQUE,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Removed tee times table (for removing specific times)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS removed_tee_times (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tee_time TEXT NOT NULL UNIQUE,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         conn.commit()
         conn.close()
 
@@ -179,11 +208,27 @@ class Database:
         conn.close()
 
     def clear_participants(self):
-        """Clear all participants for new week"""
+        """Clear all participants for new week (also clears time preferences)"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute("DELETE FROM participants")
         cursor.execute("DELETE FROM last_snapshot")
+        conn.commit()
+        conn.close()
+
+    def clear_time_preferences(self):
+        """Clear time preferences from all participants (keeps participants, only clears early/late)"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        # Get all participants
+        cursor.execute("SELECT name, preferences FROM participants")
+        for name, prefs in cursor.fetchall():
+            if prefs:
+                # Remove 'early' and 'late' from preferences
+                cleaned = ' '.join([word for word in prefs.split() if word.lower() not in ['early', 'late']])
+                cursor.execute("UPDATE participants SET preferences = ? WHERE name = ?", (cleaned.strip() or None, name))
+
         conn.commit()
         conn.close()
 
@@ -521,7 +566,8 @@ class Database:
             return False
 
     def generate_tee_times(self) -> List[str]:
-        """Generate list of available tee times based on settings"""
+        """Generate list of available tee times (auto-generated + additions - removals)"""
+        # Start with auto-generated times
         settings = self.get_tee_time_settings()
         if not settings:
             return []
@@ -532,12 +578,87 @@ class Database:
         start_hour, start_min = map(int, settings['start_time'].split(':'))
         current = datetime.now().replace(hour=start_hour, minute=start_min, second=0, microsecond=0)
 
-        tee_times = []
+        tee_times = set()
         for i in range(settings['num_slots']):
-            tee_times.append(current.strftime('%H:%M'))
+            tee_times.add(current.strftime('%H:%M'))
             current += timedelta(minutes=settings['interval_minutes'])
 
-        return tee_times
+        # Add manually added times
+        added_times = self.get_manual_tee_times()
+        tee_times.update(added_times)
+
+        # Remove manually removed times
+        removed_times = self.get_removed_tee_times()
+        tee_times.difference_update(removed_times)
+
+        # Convert back to sorted list
+        return sorted(list(tee_times))
+
+    def add_manual_tee_time(self, time_str: str) -> bool:
+        """Add a single tee time manually"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO manual_tee_times (tee_time)
+                VALUES (?)
+            """, (time_str,))
+            conn.commit()
+            conn.close()
+            return True
+        except sqlite3.IntegrityError:
+            # Time already exists
+            return False
+
+    def remove_manual_tee_time(self, time_str: str) -> bool:
+        """Mark a tee time as removed (works for auto-generated or manually added times)"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+
+            # First, remove from manual_tee_times if it exists there
+            cursor.execute("DELETE FROM manual_tee_times WHERE tee_time = ?", (time_str,))
+
+            # Then add to removed_tee_times
+            cursor.execute("""
+                INSERT INTO removed_tee_times (tee_time)
+                VALUES (?)
+            """, (time_str,))
+
+            conn.commit()
+            conn.close()
+            return True
+        except sqlite3.IntegrityError:
+            # Already in removed list
+            return False
+
+    def get_manual_tee_times(self) -> List[str]:
+        """Get all manually added tee times"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT tee_time FROM manual_tee_times ORDER BY tee_time")
+        times = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        return times
+
+    def get_removed_tee_times(self) -> List[str]:
+        """Get all removed tee times"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT tee_time FROM removed_tee_times ORDER BY tee_time")
+        times = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        return times
+
+    def clear_manual_tee_times(self) -> bool:
+        """Clear all manually added and removed tee times (reset to pure auto-generation)"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM manual_tee_times")
+        cursor.execute("DELETE FROM removed_tee_times")
+        conn.commit()
+        conn.close()
+        return True
 
 
 # ==================== AI ANALYZER ====================
@@ -811,9 +932,23 @@ SUPPORTED COMMANDS:
     Triggers: "Mike prefers early", "Dave wants late tee time", "Alex needs early morning", etc.
     Extract: player_name, time_preference ("early" or "late")
 
+15. "add_tee_time" - Add a single tee time manually
+    Triggers: "add tee time 08:24", "add 08:32", "add time 09:00", etc.
+    Extract: tee_time in HH:MM format
+
+16. "remove_tee_time" - Remove a single tee time
+    Triggers: "remove tee time 08:24", "remove 08:32", "delete time 09:00", etc.
+    Extract: tee_time in HH:MM format
+
+17. "clear_tee_times" - Clear all manually added tee times (reverts to auto-generation)
+    Triggers: "clear tee times", "reset tee times", "remove all times", etc.
+
+18. "clear_time_preferences" - Clear all time preferences for new week (keeps partner preferences)
+    Triggers: "clear time preferences", "reset time prefs", "clear early/late", "new week", etc.
+
 OUTPUT (valid JSON only):
 {{
-    "command": "show_list" | "show_tee_sheet" | "add_player" | "remove_player" | "add_guest" | "remove_guest" | "set_partner_preference" | "remove_partner_preference" | "set_avoidance" | "remove_avoidance" | "show_constraints" | "set_tee_times" | "show_tee_times" | "set_time_preference" | "unknown",
+    "command": "show_list" | "show_tee_sheet" | "add_player" | "remove_player" | "add_guest" | "remove_guest" | "set_partner_preference" | "remove_partner_preference" | "set_avoidance" | "remove_avoidance" | "show_constraints" | "set_tee_times" | "show_tee_times" | "set_time_preference" | "add_tee_time" | "remove_tee_time" | "clear_tee_times" | "clear_time_preferences" | "unknown",
     "confidence": "high" | "medium" | "low",
     "params": {{
         "player_name": "extracted name if applicable",
@@ -823,7 +958,8 @@ OUTPUT (valid JSON only):
         "start_time": "HH:MM format if applicable",
         "interval_minutes": "integer if applicable",
         "num_slots": "integer if applicable",
-        "time_preference": "early or late if applicable"
+        "time_preference": "early or late if applicable",
+        "tee_time": "HH:MM format if applicable"
     }},
     "needs_response": true
 }}
@@ -1711,24 +1847,39 @@ class SwindleBot:
                 print(f"   ❌ Failed to set tee times")
 
         elif command == 'show_tee_times':
-            # Show current tee time settings
+            # Show current tee time settings with breakdown
             settings = self.db.get_tee_time_settings()
             if not settings:
                 self.send_to_admin_group("📋 *Tee Times*\n\nNo settings configured")
                 print(f"   ℹ️  No tee time settings")
                 return
 
-            times = self.db.generate_tee_times()
-            times_list = '\n'.join(f"  • {t}" for t in times)
+            # Get all times
+            final_times = self.db.generate_tee_times()
+            added_times = self.db.get_manual_tee_times()
+            removed_times = self.db.get_removed_tee_times()
 
-            self.send_to_admin_group(
-                f"📋 *Tee Time Settings*\n\n"
-                f"Start: {settings['start_time']}\n"
-                f"Interval: {settings['interval_minutes']} minutes\n"
-                f"Slots: {settings['num_slots']}\n\n"
-                f"*Available Times:*\n{times_list}"
-            )
-            print(f"   ✅ Sent tee time settings")
+            # Build message
+            message = f"📋 *Tee Time Settings*\n\n"
+            message += f"⚙️ *Auto-Generation:*\n"
+            message += f"  Start: {settings['start_time']}\n"
+            message += f"  Interval: {settings['interval_minutes']} minutes\n"
+            message += f"  Slots: {settings['num_slots']}\n\n"
+
+            if added_times:
+                added_list = ', '.join(added_times)
+                message += f"➕ *Added:* {added_list}\n\n"
+
+            if removed_times:
+                removed_list = ', '.join(removed_times)
+                message += f"➖ *Removed:* {removed_list}\n\n"
+
+            times_list = '\n'.join(f"  • {t}" for t in final_times)
+            message += f"✅ *Final Times ({len(final_times)}):*\n{times_list}\n\n"
+            message += f"💡 'add/remove tee time HH:MM' or 'clear tee times'"
+
+            self.send_to_admin_group(message)
+            print(f"   ✅ Sent tee time breakdown")
 
         elif command == 'set_time_preference':
             # Set player time preference
@@ -1765,6 +1916,76 @@ class SwindleBot:
             if not player_found:
                 self.send_to_admin_group(f"❌ Player '{player_name}' not found")
                 print(f"   ⚠️  Player not found")
+
+        elif command == 'add_tee_time':
+            # Add a single tee time
+            params = result.get('params', {})
+            tee_time = params.get('tee_time')
+
+            if not tee_time:
+                self.send_to_admin_group("❌ Error: Need tee time in HH:MM format")
+                print(f"   ❌ Missing tee time")
+                return
+
+            # Validate format (HH:MM)
+            import re
+            if not re.match(r'^\d{1,2}:\d{2}$', tee_time):
+                self.send_to_admin_group("❌ Error: Tee time must be in HH:MM format (e.g., 08:24)")
+                print(f"   ❌ Invalid format")
+                return
+
+            # Add to database
+            success = self.db.add_manual_tee_time(tee_time)
+            if success:
+                manual_times = self.db.get_manual_tee_times()
+                times_str = ', '.join(manual_times)
+                self.send_to_admin_group(f"✅ Added tee time: {tee_time}\n\n📋 Manual tee times:\n{times_str}")
+                print(f"   ✅ Added tee time: {tee_time}")
+            else:
+                self.send_to_admin_group(f"⚠️  Tee time {tee_time} already exists")
+                print(f"   ⚠️  Already exists")
+
+        elif command == 'remove_tee_time':
+            # Remove a single tee time
+            params = result.get('params', {})
+            tee_time = params.get('tee_time')
+
+            if not tee_time:
+                self.send_to_admin_group("❌ Error: Need tee time to remove")
+                print(f"   ❌ Missing tee time")
+                return
+
+            # Remove from database
+            success = self.db.remove_manual_tee_time(tee_time)
+            if success:
+                manual_times = self.db.get_manual_tee_times()
+                if manual_times:
+                    times_str = ', '.join(manual_times)
+                    self.send_to_admin_group(f"✅ Removed tee time: {tee_time}\n\n📋 Remaining times:\n{times_str}")
+                else:
+                    self.send_to_admin_group(f"✅ Removed tee time: {tee_time}\n\n⏰ No manual times left - will use auto-generated times")
+                print(f"   ✅ Removed tee time: {tee_time}")
+            else:
+                self.send_to_admin_group(f"⚠️  Tee time {tee_time} not found")
+                print(f"   ⚠️  Not found")
+
+        elif command == 'clear_tee_times':
+            # Clear all manual tee times
+            self.db.clear_manual_tee_times()
+            self.send_to_admin_group("✅ Cleared all manual tee times\n\n⏰ Will now use auto-generated times from settings")
+            print(f"   ✅ Cleared manual tee times")
+
+        elif command == 'clear_time_preferences':
+            # Clear time preferences for new week (keeps partner preferences)
+            self.db.clear_time_preferences()
+            participants = self.db.get_participants()
+            self.send_to_admin_group(
+                f"✅ Cleared time preferences for all players\n\n"
+                f"📋 {len(participants)} participants still registered\n"
+                f"🤝 Partner preferences remain active\n\n"
+                f"💡 Time preferences reset for new week"
+            )
+            print(f"   ✅ Cleared time preferences (kept {len(participants)} participants)")
 
         elif command == 'unknown':
             # Unknown command - just log it, don't respond
@@ -1972,6 +2193,18 @@ class SwindleBot:
                             "Bot started at",
                             "Sunday Swindle Update",
                             "TEE SHEET",
+                            "Tee Time Settings",
+                            "Tee times configured",
+                            "✅ Added",
+                            "✅ Removed",
+                            "✅ Partner preference",
+                            "✅ Avoidance set",
+                            "✅ Time preference",
+                            "🤝 Constraints",
+                            "No participants yet",
+                            "📋 Current participants",
+                            "⏰ Start:",
+                            "Interval:",
                         ]
                         is_bot_message = any(pattern in text for pattern in bot_message_patterns)
 
