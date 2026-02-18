@@ -44,7 +44,7 @@ except:
 print("\n=== Finding search box ===")
 try:
     search_box.click()
-    search_box.send_keys("Sunday Swindle")
+    search_box.send_keys("Your Golf Group")
     print("✅ Typed in search box")
     time.sleep(3)
 except Exception as e:
@@ -54,9 +54,9 @@ print("\n=== Looking for chat/group elements ===")
 
 # Try various selectors for finding chats
 selectors = [
-    ('Title attribute', By.XPATH, '//span[@title="Sunday Swindle"]'),
-    ('Contains title', By.XPATH, '//*[contains(@title, "Sunday")]'),
-    ('Span with text', By.XPATH, '//span[contains(text(), "Sunday")]'),
+    ('Title attribute', By.XPATH, '//span[@title="Your Golf Group"]'),
+    ('Contains title', By.XPATH, '//*[contains(@title, "Golf")]'),
+    ('Span with text', By.XPATH, '//span[contains(text(), "Golf")]'),
     ('Chat list items', By.XPATH, '//div[@role="listitem"]'),
     ('Any span with dir', By.XPATH, '//span[@dir="auto"]'),
 ]

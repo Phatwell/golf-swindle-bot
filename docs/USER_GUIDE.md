@@ -1,8 +1,8 @@
-# Sunday Swindle Bot - User Guide
+# Golf Swindle Bot - User Guide
 
 ## What is This?
 
-The Sunday Swindle Bot automatically manages your weekly golf tee sheet! It watches your WhatsApp group, figures out who's playing, and creates an organized tee sheet with actual tee times.
+The Golf Swindle Bot automatically manages your weekly golf tee sheet! It watches your WhatsApp group, figures out who's playing, and creates an organized tee sheet with actual tee times.
 
 **No more manual spreadsheets or confusion!** ⛳
 
@@ -11,7 +11,7 @@ The Sunday Swindle Bot automatically manages your weekly golf tee sheet! It watc
 ## What The Bot Does Automatically
 
 ### 1. **Watches Your WhatsApp Group** 👀
-The bot reads messages in the "Sunday Swindle" group and figures out who's playing.
+The bot reads messages in your configured golf group and figures out who's playing.
 
 ### 2. **Understands Natural Language** 🧠
 It understands when people say:
@@ -42,7 +42,8 @@ The bot sends messages to the **configured admin** at these times:
 |------|------|-----|
 | **12:00 PM Every Day** | Health Check | Confirms bot is running |
 | **8:00 PM Mon-Sat** | Daily Update | Current player list |
-| **5:00 PM Saturday** | Final Tee Sheet | Complete tee sheet for Sunday |
+| **5:00 PM Saturday** | Final Tee Sheet | Complete tee sheet for Sunday (published & locked in) |
+| **12:01 AM Monday** | Weekly Reset | Clears participants, time prefs, tee time mods, published sheet |
 
 **Note**: The bot won't spam you with constant "UPDATE" messages - it only notifies when the player list actually changes.
 
@@ -50,7 +51,7 @@ The bot sends messages to the **configured admin** at these times:
 
 ## Admin Commands
 
-Send these commands in the **"Sunday Swindle - Admin"** WhatsApp group. The bot checks this group **every minute** for fast responses.
+Send these commands in your **admin** WhatsApp group. The bot checks this group **every minute** for fast responses.
 
 ### 📋 Viewing Information
 
@@ -143,7 +144,7 @@ Remove avoidance for Alex
 ```
 Set tee times from 8:00
 ```
-(The bot will use default 8-minute intervals and 10 slots)
+(The bot will use default 8-minute intervals and configured number of slots)
 
 You can be more specific:
 ```
@@ -167,9 +168,36 @@ Clear tee times              # Reset to pure auto-generation
 
 ---
 
+### 🔀 Randomize Tee Sheet
+
+**Full reshuffle (respects all constraints):**
+```
+Randomize
+```
+This generates a completely new tee sheet from scratch. Useful if you want different groups but still respects partner preferences and avoidances.
+
+You can also say: `Shuffle`, `Reshuffle`, or `New tee sheet`
+
+---
+
+### 🔒 Tee Sheet Stability (After Saturday 5pm)
+
+Once the tee sheet is published at 5pm Saturday, the bot switches to **minimal adjustment mode**:
+
+- If someone **drops out**, only that person is removed from their group
+- Everyone else **stays in their same group at the same tee time**
+- If a group becomes too small, those players are merged into the nearest available group
+- The updated sheet is clearly marked as **(UPDATED)** with the changes listed
+
+**Why?** If the bot reshuffled everyone when one person drops out, players who already saw the original sheet might turn up at the wrong tee time.
+
+**Want a full reshuffle anyway?** Send `Randomize` to force a completely new sheet.
+
+---
+
 ## How It All Works Together
 
-### Sunday Swindle Typical Week:
+### Typical Week:
 
 **Monday Morning**
 - Organizer posts: "Morning all, now taking names for Sunday"
@@ -180,18 +208,18 @@ Clear tee times              # Reset to pure auto-generation
 - You receive daily updates at 8pm showing current list
 
 **Saturday 5:00 PM**
-- Bot generates final tee sheet
-- Sends to Chris with:
+- Bot generates and **publishes** the final tee sheet
+- Sends with:
   - All groups (optimally filled to 4 players each)
   - Actual tee times assigned
   - How many tee time slots can be returned to course
+- **Sheet is now locked in** - future changes will only minimally adjust
 
-**If You Need to Make Changes**
-- Use admin commands in admin group
-- "Add John Smith" if someone signs up outside WhatsApp
-- "Remove Mike Jones" if someone cancels
-- "Mike plays with John" if partners request to play together
-- "Show tee sheet" to see updated groups
+**If You Need to Make Changes After Saturday 5pm**
+- "Remove Mike Jones" → Mike is removed, everyone else stays put
+- "Add John Smith" → John is added to a group with space
+- "Show tee sheet" → Shows the adjusted sheet with changes highlighted
+- "Randomize" → Full reshuffle if you want completely new groups
 
 ---
 
@@ -206,16 +234,16 @@ Show list
 
 **Bot responds:**
 ```
-📋 Sunday Swindle Update
+📋 Your Golf Group Update
 
 👥 17 signed up (19 total with guests)
 
-• Alex (bringing: John balls) - MP
-• Dave Walker - Later tee time
+• Alex (bringing: Bob Green) - MP
+• Gary Evans - Later tee time
 • Mike
 • John
 • Paul
-• Danny Raf
+• Dan Roberts
 • Adam
 [... etc]
 ```
@@ -233,7 +261,7 @@ Add Tom Smith
 ```
 ✅ Added Tom Smith
 
-📋 Sunday Swindle Update
+📋 Your Golf Group Update
 👥 18 signed up (20 total with guests)
 [Updated list]
 ```
@@ -249,7 +277,7 @@ Show tee sheet
 
 **Bot responds:**
 ```
-🏌️ SUNDAY SWINDLE TEE SHEET 🏌️
+🏌️ YOUR GOLF GROUP TEE SHEET 🏌️
 
 📅 16/02/2026
 
@@ -267,20 +295,20 @@ Show tee sheet
 ⏰ Group 2 - 08:08
   • Alex
   • Tom (guest of Alex)
-  • Dave Walker
+  • Gary Evans
   • Steve
 
 ⏰ Group 3 - 08:16
-  • Danny Raf
+  • Dan Roberts
   • Adam
-  • Lloyd
-  • David Murphy
+  • Dave
+  • David Clark
 
 ⏰ Group 4 - 08:24
-  • Sam Healy
-  • Jordan Thorne
-  • Goochie
-  • Liam Sewell
+  • Tom Wilson
+  • Jordan
+  • Rich
+  • Liam
 ```
 
 **What this tells you:**
@@ -303,23 +331,23 @@ When you set constraints like partner preferences or avoidances, they are **stor
 
 **Week 1 (Setup)**
 ```
-Lloyd plays with Segan
+Mike plays with John
 ```
 ✅ Constraint saved to database
 
 **Week 2 (Both Playing)**
-- Lloyd ✅ and Segan ✅ sign up
+- Mike ✅ and John ✅ sign up
 - Bot automatically pairs them together
 - You didn't need to do anything!
 
 **Week 3 (Only One Playing)**
-- Only Segan ✅ signs up
-- Lloyd ❌ doesn't play this week
-- Bot groups Segan with other available players
+- Only John ✅ signs up
+- Mike ❌ doesn't play this week
+- Bot groups John with other available players
 - Constraint remains active (not deleted)
 
 **Week 4 (Both Back)**
-- Lloyd ✅ and Segan ✅ both sign up again
+- Mike ✅ and John ✅ both sign up again
 - Bot automatically pairs them together again
 - Constraint still working!
 
@@ -327,7 +355,7 @@ Lloyd plays with Segan
 
 **At the beginning of the season**, set up all your regular partnerships:
 ```
-Lloyd plays with Segan
+Mike plays with John
 Mike plays with John
 Alex plays with Tom
 Dave wants late tee time
@@ -339,7 +367,7 @@ Then **forget about them!** The bot applies these automatically every week for t
 
 Only remove constraints if preferences change:
 ```
-Remove Lloyd's partner preference
+Remove Mike's partner preference
 Remove avoidance for David
 ```
 
@@ -353,7 +381,7 @@ Otherwise, leave them active all season!
 
 **Partner Preferences:**
 ```
-Lloyd plays with Segan
+Mike plays with John
 Mike plays with John
 ```
 ✅ Set at the start of the season
@@ -426,7 +454,7 @@ Clear tee times          # Resets to auto-generation
 ## Troubleshooting
 
 ### "The bot didn't respond to my command"
-- Make sure you're in the **admin group** ("Sunday Swindle - Admin")
+- Make sure you're in the **admin group**
 - Wait 1 minute (bot checks every minute)
 - Check your command spelling
 
@@ -463,10 +491,7 @@ Contact your bot administrator - the person who receives all bot messages
 | Remove tee time | `Remove tee time 08:32` |
 | Clear tee times | `Clear tee times` |
 | Clear time prefs | `Clear time preferences` |
-| Add tee time | `Add tee time 09:00` |
-| Remove tee time | `Remove tee time 08:32` |
-| Clear tee times | `Clear tee times` |
-| Clear time prefs | `Clear time preferences` |
+| Randomize sheet | `Randomize` |
 
 ---
 
@@ -491,3 +516,4 @@ Contact your bot administrator - the person who receives all bot messages
 **Questions?** Ask your bot administrator
 
 **Last Updated**: February 2026
+**Version**: 5.1 (Phase 5 - Tee Sheet Stability)

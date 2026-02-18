@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Test the actual bot's get_group_messages method"""
 
-import sys
-sys.path.insert(0, '/home/phatwell/projects/golf-swindle-bot')
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from swindle_bot import WhatsAppBot, Config
 
@@ -21,7 +21,7 @@ print("\n=== Bot initialized successfully ===\n")
 for i in range(3):
     print(f"\n=== ATTEMPT {i+1} ===")
     try:
-        messages = bot.get_group_messages("Sunday Swindle")
+        messages = bot.get_group_messages("Your Golf Group")
 
         if messages is None:
             print(f"❌ RESULT: None (failure)")

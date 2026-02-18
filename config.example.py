@@ -21,7 +21,7 @@ MY_NUMBER = "Your Phone Number"  # Example: "447123456789"
 # If some contacts have unusual display names in WhatsApp, map them here
 NAME_MAPPING = {
     # Example: ".": "John",  # If someone's contact name is literally "."
-    # Example: "L": "Lloyd",  # If someone's contact name is just "L"
+    # Example: "L": "Dave",   # If someone's contact name is just "L"
 }
 
 # Golf Settings
@@ -31,7 +31,14 @@ DEFAULT_INTERVAL_MINUTES = 8  # Minutes between tee times
 DEFAULT_NUM_SLOTS = 10  # Number of tee time slots booked
 
 # Database
-DB_PATH = "golf_swindle.db"
+DB_PATH = "data/golf_swindle.db"
+
+# WhatsApp Settings
+MAX_MESSAGES = 200  # Number of recent messages to check in WhatsApp group
+MAIN_GROUP_CHECK_MINUTES = 180  # How often to check the main swindle group (minutes) - on-demand refresh happens for show list/tee sheet commands and scheduled messages
+ADMIN_GROUP_CHECK_SECONDS = 60  # How often to check the admin group (seconds)
+ADMIN_BURST_DURATION_SECONDS = 180  # After a command, check admin group rapidly for this long (seconds)
+ADMIN_BURST_CHECK_SECONDS = 5  # During burst mode, check every N seconds
 
 # Chrome Settings
 CHROME_RESTART_HOURS = 24  # Restart Chrome session every N hours

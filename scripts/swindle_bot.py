@@ -31,7 +31,7 @@ from selenium.common.exceptions import NoSuchElementException
 
 # ==================== CONFIGURATION ====================
 class Config:
-    GROUP_NAME = "Sunday Swindle"  # Change to your WhatsApp group name (exact match)
+    GROUP_NAME = "Your Golf Group"  # Change to your WhatsApp group name (exact match)
     MY_NUMBER = "YOUR_PHONE_NUMBER"     # Change to your WhatsApp number (no + or spaces)
     TEE_TIMES = ["8:24", "8:32", "8:40", "8:48", "8:56", "9:04", "9:12"]
     MAX_GROUP_SIZE = 4
@@ -311,7 +311,7 @@ class TeeSheetGenerator:
     
     def _format_tee_sheet(self, groups: List[List[Dict]], participants: List[Dict]) -> str:
         """Format tee sheet message"""
-        message = f"⛳ *SUNDAY SWINDLE TEE SHEET*\n\n"
+        message = f"⛳ *YOUR GOLF GROUP TEE SHEET*\n\n"
         message += f"Date: {datetime.now().strftime('%d/%m/%Y')}\n"
         message += f"Total Players: {len(participants)}\n"
         message += f"Groups: {len(groups)}\n\n"
@@ -411,7 +411,7 @@ class WhatsAppBot:
             self.driver.save_screenshot('qr_code.png')
             print(f"\n✅ Screenshot saved: {os.path.abspath('qr_code.png')}")
             print("\nFrom your Windows machine, download it:")
-            print(f"   scp phatwell@192.168.1.72:{os.path.abspath('qr_code.png')} .")
+            print(f"   scp user@your-server:{os.path.abspath('qr_code.png')} .")
             print("\nWaiting for you to scan the QR code...")
             
             for i in range(120):
@@ -547,7 +547,7 @@ class WhatsAppBot:
                     sender_elem = elem.find_element(By.XPATH, './/*[@data-pre-plain-text]')
                     pre_text = sender_elem.get_attribute('data-pre-plain-text')
 
-                    # Extract sender name/phone from pre_text like "[11:29, 2/15/2026] +44 7850 450853: "
+                    # Extract sender name/phone from pre_text like "[11:29, 2/15/2026] +44 7123 456789: "
                     sender = "Unknown"
                     if pre_text and ']:' in pre_text:
                         sender = pre_text.split(']')[1].strip().rstrip(':').strip()
@@ -619,9 +619,9 @@ class SwindleBot:
         participants = self.db.get_participants()
         
         if not participants:
-            return '📋 *Sunday Swindle Update*\n\nNo participants yet.'
+            return '📋 *Your Golf Group Update*\n\nNo participants yet.'
         
-        message = f"📋 *Sunday Swindle Update*\n\n"
+        message = f"📋 *Your Golf Group Update*\n\n"
         message += f"Total Players: {len(participants)}\n\n"
         
         for i, p in enumerate(participants, 1):

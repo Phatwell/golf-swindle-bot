@@ -30,7 +30,7 @@ from selenium.webdriver.support import expected_conditions as EC
 
 # ==================== CONFIGURATION ====================
 class Config:
-    GROUP_NAME = "Sunday Swindle"
+    GROUP_NAME = "Your Golf Group"
     MY_NUMBER = "YOUR_PHONE_NUMBER"
     TEE_TIMES = ["8:24", "8:32", "8:40", "8:48", "8:56", "9:04", "9:12"]
     MAX_GROUP_SIZE = 4
@@ -516,7 +516,7 @@ class TeeSheetGenerator:
             tee_groups.append(current_group)
 
         # Format tee sheet
-        lines = ["🏌️ *SUNDAY SWINDLE TEE SHEET* 🏌️\n"]
+        lines = ["🏌️ *YOUR GOLF GROUP TEE SHEET* 🏌️\n"]
         lines.append(f"📅 {datetime.now().strftime('%d/%m/%Y')}\n")
         lines.append(f"👥 {total_players} players, {len(tee_groups)} groups\n")
 
@@ -553,11 +553,11 @@ class SwindleBot:
         participants = self.db.get_participants()
 
         if not participants:
-            return '📋 *Sunday Swindle Update*\n\nNo participants yet.'
+            return '📋 *Your Golf Group Update*\n\nNo participants yet.'
 
         total = sum(1 + len(p.get('guests', [])) for p in participants)
 
-        lines = ['📋 *Sunday Swindle Update*\n']
+        lines = ['📋 *Your Golf Group Update*\n']
         lines.append(f'👥 {len(participants)} signed up ({total} total with guests)\n')
 
         for p in participants:

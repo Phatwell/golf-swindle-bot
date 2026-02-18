@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Test AI-powered message parser"""
 
-import sys
-sys.path.insert(0, '/home/phatwell/projects/golf-swindle-bot')
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from swindle_bot import MessageParser, Config
 import json

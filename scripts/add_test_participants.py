@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Add test participants to see the full tee sheet system in action"""
 
-import sys
-sys.path.insert(0, '/home/phatwell/projects/golf-swindle-bot')
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from swindle_bot_v5_admin import Database, TeeSheetGenerator, Config
 
@@ -22,24 +22,24 @@ print("\n✅ Cleared existing participants\n")
 # Include all the players from our constraints plus some others
 test_participants = [
     # Constraint players (all 6 people from the 3 pairs)
-    {'name': 'Lloyd', 'guests': [], 'preferences': None},
-    {'name': 'Segan', 'guests': [], 'preferences': None},
-    {'name': 'Chris Hatwell', 'guests': [], 'preferences': 'early'},  # Wants early tee time
-    {'name': 'Daryl Gilbert', 'guests': [], 'preferences': None},
-    {'name': 'Sam Healy', 'guests': [], 'preferences': None},
-    {'name': 'Ricky', 'guests': [], 'preferences': None},
+    {'name': 'Dave', 'guests': [], 'preferences': None},
+    {'name': 'Steve', 'guests': [], 'preferences': None},
+    {'name': 'John Smith', 'guests': [], 'preferences': 'early'},  # Wants early tee time
+    {'name': 'Mike Johnson', 'guests': [], 'preferences': None},
+    {'name': 'Tom Wilson', 'guests': [], 'preferences': None},
+    {'name': 'Pete', 'guests': [], 'preferences': None},
 
     # Additional players to make interesting groups
     {'name': 'Mike', 'guests': [], 'preferences': None},
     {'name': 'John', 'guests': [], 'preferences': None},
     {'name': 'Paul', 'guests': [], 'preferences': None},
-    {'name': 'Dave Walker', 'guests': [], 'preferences': 'late'},  # Wants late tee time
+    {'name': 'Gary Evans', 'guests': [], 'preferences': 'late'},  # Wants late tee time
     {'name': 'Alex', 'guests': ['Tom Jones'], 'preferences': None},  # Bringing a guest
-    {'name': 'Danny Raf', 'guests': [], 'preferences': None},
+    {'name': 'Dan Roberts', 'guests': [], 'preferences': None},
     {'name': 'Adam', 'guests': [], 'preferences': 'early'},  # Another early bird
-    {'name': 'David Murphy', 'guests': [], 'preferences': None},
-    {'name': 'Jordan Thorne', 'guests': [], 'preferences': None},
-    {'name': 'Goochie', 'guests': [], 'preferences': 'late'},  # Another late starter
+    {'name': 'David Clark', 'guests': [], 'preferences': None},
+    {'name': 'James Brown', 'guests': [], 'preferences': None},
+    {'name': 'Rich', 'guests': [], 'preferences': 'late'},  # Another late starter
 ]
 
 print("Adding participants...")
@@ -96,12 +96,12 @@ for i, group in enumerate(groups, 1):
     players = [p['name'] for p in group if not p.get('is_guest')]
 
     # Check each constraint
-    if 'Lloyd' in players and 'Segan' in players:
-        print(f"  ✅ Lloyd + Segan paired together in Group {i}")
-    if 'Chris Hatwell' in players and 'Daryl Gilbert' in players:
-        print(f"  ✅ Chris Hatwell + Daryl Gilbert paired together in Group {i}")
-    if 'Sam Healy' in players and 'Ricky' in players:
-        print(f"  ✅ Sam Healy + Ricky paired together in Group {i}")
+    if 'Dave' in players and 'Steve' in players:
+        print(f"  ✅ Dave + Steve paired together in Group {i}")
+    if 'John Smith' in players and 'Mike Johnson' in players:
+        print(f"  ✅ John Smith + Mike Johnson paired together in Group {i}")
+    if 'Tom Wilson' in players and 'Pete' in players:
+        print(f"  ✅ Tom Wilson + Pete paired together in Group {i}")
 
 # Check if guests stayed with hosts
 print("\n🔍 Checking if guests stayed with hosts:\n")
@@ -113,8 +113,8 @@ for i, group in enumerate(groups, 1):
 # Check if time preferences were respected
 print("\n🔍 Checking if time preferences were applied:\n")
 
-early_prefs = ['Chris Hatwell', 'Adam']
-late_prefs = ['Dave Walker', 'Goochie']
+early_prefs = ['John Smith', 'Adam']
+late_prefs = ['Gary Evans', 'Rich']
 
 for i, group in enumerate(groups, 1):
     players = [p['name'] for p in group if not p.get('is_guest')]
@@ -146,7 +146,7 @@ This is what you would see if {len(participants)} people signed up in
 the WhatsApp group and you sent "Show tee sheet" in the admin group.
 
 The bot automatically:
-  ✅ Paired partners together (Lloyd+Segan, Chris+Daryl, Sam+Ricky)
+  ✅ Paired partners together (Dave+Steve, John+Mike, Tom+Pete)
   ✅ Kept guests with their hosts (Alex+Tom Jones)
   ✅ Assigned early tee times to early birds
   ✅ Assigned late tee times to late starters

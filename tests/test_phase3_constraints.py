@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Test Phase 3 constraint system"""
 
-import sys
-sys.path.insert(0, '/home/phatwell/projects/golf-swindle-bot')
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from swindle_bot_v5_admin import AdminCommandHandler, Database, TeeSheetGenerator, Config
-import os
 
 print("="*60)
 print(" TESTING PHASE 3 CONSTRAINT SYSTEM")

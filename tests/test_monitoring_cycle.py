@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Test one complete monitoring cycle"""
 
-import sys
+import sys, os
 import signal
-sys.path.insert(0, '/home/phatwell/projects/golf-swindle-bot')
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from swindle_bot import SwindleBot
 import time

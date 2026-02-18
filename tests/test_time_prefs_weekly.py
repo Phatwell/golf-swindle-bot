@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Test that time preferences are weekly but partner preferences are seasonal"""
 
-import sys
-sys.path.insert(0, '/home/phatwell/projects/golf-swindle-bot')
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from src.swindle_bot_v5_admin import Database
 

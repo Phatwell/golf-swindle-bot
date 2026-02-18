@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Test how new constraints affect grouping"""
 
-import sys
-sys.path.insert(0, '/home/phatwell/projects/golf-swindle-bot')
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from swindle_bot_v5_admin import Database, TeeSheetGenerator, Config
 
@@ -29,17 +29,17 @@ print(" SCENARIO 1: All Partners Playing")
 print("="*70)
 
 participants_1 = [
-    {'name': 'Lloyd', 'guests': [], 'preferences': None},
-    {'name': 'Segan', 'guests': [], 'preferences': None},
-    {'name': 'Chris Hatwell', 'guests': [], 'preferences': None},
-    {'name': 'Daryl Gilbert', 'guests': [], 'preferences': None},
-    {'name': 'Sam Healy', 'guests': [], 'preferences': None},
-    {'name': 'Ricky', 'guests': [], 'preferences': None},
+    {'name': 'Dave', 'guests': [], 'preferences': None},
+    {'name': 'Steve', 'guests': [], 'preferences': None},
+    {'name': 'John Smith', 'guests': [], 'preferences': None},
+    {'name': 'Mike Johnson', 'guests': [], 'preferences': None},
+    {'name': 'Tom Wilson', 'guests': [], 'preferences': None},
+    {'name': 'Pete', 'guests': [], 'preferences': None},
     {'name': 'Mike', 'guests': [], 'preferences': None},
     {'name': 'John', 'guests': [], 'preferences': None},
 ]
 
-print("\nPlayers: Lloyd, Segan, Chris Hatwell, Daryl Gilbert, Sam Healy, Ricky, Mike, John")
+print("\nPlayers: Dave, Steve, John Smith, Mike Johnson, Tom Wilson, Pete, Mike, John")
 
 tee_times = db.generate_tee_times()
 _, groups, _ = generator.generate(participants_1, partner_prefs, avoidances, tee_times)
@@ -53,12 +53,12 @@ for i, group in enumerate(groups, 1):
 for i, group in enumerate(groups, 1):
     players = [p['name'] for p in group if not p.get('is_guest')]
 
-    if 'Lloyd' in players and 'Segan' in players:
-        print(f"    ✅ Lloyd + Segan paired in Group {i}")
-    if 'Chris Hatwell' in players and 'Daryl Gilbert' in players:
-        print(f"    ✅ Chris Hatwell + Daryl Gilbert paired in Group {i}")
-    if 'Sam Healy' in players and 'Ricky' in players:
-        print(f"    ✅ Sam Healy + Ricky paired in Group {i}")
+    if 'Dave' in players and 'Steve' in players:
+        print(f"    ✅ Dave + Steve paired in Group {i}")
+    if 'John Smith' in players and 'Mike Johnson' in players:
+        print(f"    ✅ John Smith + Mike Johnson paired in Group {i}")
+    if 'Tom Wilson' in players and 'Pete' in players:
+        print(f"    ✅ Tom Wilson + Pete paired in Group {i}")
 
 # Scenario 2: Only some partners playing
 print("\n" + "="*70)
@@ -66,17 +66,17 @@ print(" SCENARIO 2: Only Some Partners Playing")
 print("="*70)
 
 participants_2 = [
-    {'name': 'Lloyd', 'guests': [], 'preferences': None},  # Segan NOT playing
-    {'name': 'Chris Hatwell', 'guests': [], 'preferences': None},
-    {'name': 'Daryl Gilbert', 'guests': [], 'preferences': None},
-    {'name': 'Sam Healy', 'guests': [], 'preferences': None},  # Ricky NOT playing
+    {'name': 'Dave', 'guests': [], 'preferences': None},  # Steve NOT playing
+    {'name': 'John Smith', 'guests': [], 'preferences': None},
+    {'name': 'Mike Johnson', 'guests': [], 'preferences': None},
+    {'name': 'Tom Wilson', 'guests': [], 'preferences': None},  # Pete NOT playing
     {'name': 'Mike', 'guests': [], 'preferences': None},
     {'name': 'John', 'guests': [], 'preferences': None},
     {'name': 'Paul', 'guests': [], 'preferences': None},
     {'name': 'David', 'guests': [], 'preferences': None},
 ]
 
-print("\nPlayers: Lloyd (no Segan), Chris Hatwell, Daryl Gilbert, Sam Healy (no Ricky), Mike, John, Paul, David")
+print("\nPlayers: Dave (no Steve), John Smith, Mike Johnson, Tom Wilson (no Pete), Mike, John, Paul, David")
 
 _, groups, _ = generator.generate(participants_2, partner_prefs, avoidances, tee_times)
 
@@ -86,9 +86,9 @@ for i, group in enumerate(groups, 1):
     print(f"  Group {i}: {', '.join(players)}")
 
 print("\n📝 Notes:")
-print("  • Lloyd grouped with others (Segan not playing)")
-print("  • Sam Healy grouped with others (Ricky not playing)")
-print("  • Chris Hatwell + Daryl Gilbert still paired (both playing)")
+print("  • Dave grouped with others (Steve not playing)")
+print("  • Tom Wilson grouped with others (Pete not playing)")
+print("  • John Smith + Mike Johnson still paired (both playing)")
 print("  • Constraints remain active for future weeks!")
 
 print("\n" + "="*70)

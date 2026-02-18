@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Add partner preferences to the database"""
 
-import sys
-sys.path.insert(0, '/home/phatwell/projects/golf-swindle-bot')
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from swindle_bot_v5_admin import Database
 
@@ -14,9 +14,9 @@ db = Database("golf_swindle.db")
 
 # Add partner preferences
 preferences = [
-    ("Lloyd", "Segan"),
-    ("Chris Hatwell", "Daryl Gilbert"),
-    ("Sam Healy", "Ricky")
+    ("Dave", "Steve"),
+    ("John Smith", "Mike Johnson"),
+    ("Tom Wilson", "Pete")
 ]
 
 print("\nAdding preferences...")

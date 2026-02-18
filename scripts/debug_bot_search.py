@@ -31,7 +31,7 @@ print("Opening WhatsApp Web...")
 driver.get('https://web.whatsapp.com')
 time.sleep(5)
 
-group_name = "Sunday Swindle"
+group_name = "Your Golf Group"
 
 print("\n=== Step 1: Find search box ===")
 try:

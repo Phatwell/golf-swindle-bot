@@ -20,7 +20,7 @@ The Golf Swindle Bot is an automated tee sheet management system that monitors a
 ### Technology Stack
 - **Language**: Python 3
 - **Browser Automation**: Selenium WebDriver (Chrome)
-- **AI**: Anthropic Claude API (Haiku 4.5 for analysis, Sonnet 4.5 for commands)
+- **AI**: Anthropic Claude API (Sonnet for both analysis and command parsing)
 - **Database**: SQLite
 - **Scheduling**: Python `schedule` library
 
@@ -29,6 +29,7 @@ The Golf Swindle Bot is an automated tee sheet management system that monitors a
 - **Phase 2**: Manual player/guest management via admin commands
 - **Phase 3**: Group constraints (partner preferences, avoidances) & optimized grouping
 - **Phase 4**: Dynamic tee time management with preference-based assignment
+- **Phase 5**: Tee sheet stability, AI upgrade to Sonnet, token optimization
 
 ---
 
@@ -53,7 +54,7 @@ The Golf Swindle Bot is an automated tee sheet management system that monitors a
                        ↓
 ┌─────────────────────────────────────────────────────────────┐
 │                   AIAnalyzer                                 │
-│  - Claude Haiku for message analysis                         │
+│  - Claude Sonnet for message analysis                          │
 │  - Player extraction with natural language understanding     │
 │  - Guest detection & duplicate handling                      │
 │  - Timeline filtering (ignore pre-signup messages)           │
@@ -77,7 +78,7 @@ The Golf Swindle Bot is an automated tee sheet management system that monitors a
                        ↓
 ┌─────────────────────────────────────────────────────────────┐
 │            AdminCommandHandler                               │
-│  - Claude Haiku for command parsing                          │
+│  - Claude Sonnet for command parsing                           │
 │  - Natural language command understanding                    │
 │  - Action execution & response generation                    │
 └─────────────────────────────────────────────────────────────┘
@@ -158,6 +159,17 @@ CREATE TABLE removed_tee_times (
 
 **Additive Logic**: `Final Times = Auto-Generated + Manual - Removed`
 
+### `published_tee_sheet` Table (Phase 5)
+```sql
+CREATE TABLE published_tee_sheet (
+    id INTEGER PRIMARY KEY,
+    sheet_json TEXT NOT NULL,          -- JSON: groups, players, tee times, formatted text
+    published_at DATETIME DEFAULT CURRENT_TIMESTAMP
+)
+```
+
+**Purpose**: Stores the published tee sheet after Saturday 5pm. Used for minimal adjustments when players drop out, instead of regenerating the entire sheet. Cleared on weekly reset.
+
 ---
 
 ## Scheduled Jobs
@@ -170,7 +182,8 @@ CREATE TABLE removed_tee_times (
 | **Every 1 hour** | All | `check_main_group()` | Check main group for new signups (when active) |
 | **12:00 PM** | Daily | `send_health_check()` | Health check message |
 | **8:00 PM** | Mon, Tue, Wed, Thu, Fri, Sat | `send_daily_update()` | Daily participant list update |
-| **5:00 PM** | Saturday | `generate_saturday_tee_sheet()` | Final tee sheet generation |
+| **5:00 PM** | Saturday | `generate_saturday_tee_sheet()` | Final tee sheet generation & publishing |
+| **12:01 AM** | Monday | `clear_weekly_data()` | Reset participants, time prefs, tee time mods, published sheet |
 
 ### Detailed Job Descriptions
 
@@ -217,7 +230,7 @@ CREATE TABLE removed_tee_times (
 
 #### 5. Saturday Tee Sheet (5:00 PM)
 **Function**: `generate_saturday_tee_sheet()`
-**Purpose**: Generate final tee sheet for Sunday game
+**Purpose**: Generate and **publish** final tee sheet for Sunday game
 **Sends to**: Your personal number
 **Process**:
 - Gets all participants
@@ -225,7 +238,17 @@ CREATE TABLE removed_tee_times (
 - Gets tee time settings
 - Generates optimized groups (Phase 3)
 - Assigns actual tee times (Phase 4)
+- **Saves as published sheet** (locks in groups/times for stability)
 - Sends formatted tee sheet
+
+**After publishing**: Any changes via admin commands (add/remove player) will use the **minimal adjustment** algorithm instead of regenerating from scratch. This prevents players from being moved to different tee times without realising.
+
+#### 6. Weekly Reset (12:01 AM Monday)
+**Function**: `clear_weekly_data()`
+**Purpose**: Reset for new week
+**Clears**: Participants, time preferences, manual tee time modifications, published tee sheet
+**Keeps**: Partner preferences, avoidances, tee time settings
+**Sends**: Notification to admin group confirming what was cleared/kept
 
 ---
 
@@ -259,8 +282,8 @@ sender = spans[0].text.strip()  # First span is sender name
 **Name Mapping** (for unusual contact names):
 ```python
 NAME_MAPPING = {
-    ".": "Segan",    # Contact name is literally "."
-    "L": "Lloyd",    # Contact name is "L"
+    ".": "John",     # Contact name is literally "."
+    "L": "Dave",     # Contact name is "L"
 }
 ```
 
@@ -273,7 +296,15 @@ NAME_MAPPING = {
 
 ### 2. AIAnalyzer Class
 
-**Model**: Claude Haiku 4.5 (fast and cost-effective)
+**Model**: Claude Sonnet (`claude-sonnet-4-5-20250929`) with `temperature=0` for deterministic results
+
+**Token Optimization**:
+- Separate `system` and `user` messages (best practice for Claude API)
+- Trimmed system prompt (~250 tokens vs ~600 previously)
+- `max_tokens=1000` (down from 2000)
+- **Message change detection**: Compares current messages against last snapshot - skips API call entirely if nothing changed (saves 50-80% of calls)
+
+**AI Error Protection**: If the API returns 0 players but the database has existing players, the existing data is preserved (prevents accidental wipe on API errors).
 
 **Pre-Filtering** (Python-side before AI):
 1. Find "now taking names" organizer message
@@ -351,7 +382,9 @@ NAME_MAPPING = {
 
 ### 4. AdminCommandHandler Class
 
-**Model**: Claude Haiku 4.5
+**Model**: Claude Sonnet (`claude-sonnet-4-5-20250929`) with `temperature=0`
+
+**Token Optimization**: Compact system prompt (~120 tokens), `max_tokens=300`
 
 **Supported Commands**:
 - **Phase 1**: `show_list`, `show_tee_sheet`
@@ -359,6 +392,7 @@ NAME_MAPPING = {
 - **Phase 3**: `set_partner_preference`, `set_avoidance`, `show_constraints`, `remove_partner_preference`, `remove_avoidance`
 - **Phase 4**: `set_tee_times`, `show_tee_times`, `set_time_preference`
 - **Phase 4.5**: `add_tee_time`, `remove_tee_time`, `clear_tee_times`, `clear_time_preferences`
+- **Phase 5**: `randomize`
 
 **Natural Language Examples**:
 - "Show list" → `show_list`
@@ -381,8 +415,8 @@ ANTHROPIC_API_KEY=your_api_key_here
 ```python
 class Config:
     # WhatsApp Groups
-    GROUP_NAME = "Sunday Swindle"          # Main group to monitor
-    ADMIN_GROUP_NAME = "Sunday Swindle - Admin"  # Admin commands group
+    GROUP_NAME = "Your Golf Group"           # Main group to monitor
+    ADMIN_GROUP_NAME = "Your Golf Group - Admin"  # Admin commands group
 
     # Admin Users (phone numbers or names)
     ADMIN_USERS = [
@@ -392,8 +426,8 @@ class Config:
 
     # Name Mapping (for unusual contact names)
     NAME_MAPPING = {
-        ".": "Segan",
-        "L": "Lloyd"
+        ".": "John",
+        "L": "Dave"
     }
 
     # Golf Settings
@@ -529,15 +563,24 @@ for p in participants:
 
 ### AI API Usage
 
-**Messages Analyzed** (per week):
-- Main group check: 1/hour × 168 hours = 168 calls
-- Admin commands: ~10-20 calls
-- **Total**: ~180-190 API calls/week
+**Messages Analyzed** (per week, with change detection optimization):
+- Main group check: ~20-50 calls (only when messages change, not every hour)
+- Admin commands: ~20 calls
+- **Total**: ~40-70 API calls/week
 
-**Cost Estimate** (Claude Haiku 4.5):
-- Input: ~500 tokens/call × 190 calls = 95,000 tokens
-- Output: ~200 tokens/call × 190 calls = 38,000 tokens
-- **Cost**: ~$0.10-0.20 per week (very low!)
+**Cost Estimate** (Claude Sonnet):
+- Message analysis input: ~1,800 tokens/call × 50 calls = 90,000 tokens
+- Message analysis output: ~300 tokens/call × 50 calls = 15,000 tokens
+- Admin commands input: ~160 tokens/call × 20 calls = 3,200 tokens
+- Admin commands output: ~100 tokens/call × 20 calls = 2,000 tokens
+- **Cost**: ~$1.20-2.70 per week (~$8/month average)
+
+**Token Optimization Measures**:
+- Skip AI call when messages haven't changed since last check (biggest saving)
+- Trimmed system prompts (250 tokens vs 600 previously)
+- Separate system/user messages (Claude API best practice)
+- `temperature=0` for deterministic, consistent results
+- Reduced `max_tokens` (1000 for analysis, 300 for commands)
 
 ### Chrome Memory Usage
 - Typical: 200-400 MB
@@ -558,22 +601,22 @@ for p in participants:
 
 ## Future Enhancement Ideas
 
-### Phase 5: Handicap & Competition Management
+### Phase 6: Handicap & Competition Management
 - Track player handicaps
 - Calculate match play pairings
 - Generate competition draws
 
-### Phase 6: Notifications & Reminders
+### Phase 7: Notifications & Reminders
 - Send tee time confirmations to individual players
 - 24-hour reminders
 - Weather alerts
 
-### Phase 7: Historical Analytics
+### Phase 8: Historical Analytics
 - Attendance tracking
 - Popular playing partners analysis
 - Performance stats
 
-### Phase 8: Multi-Week Planning
+### Phase 9: Multi-Week Planning
 - Recurring events
 - Season scheduling
 - Waiting list management
@@ -605,11 +648,44 @@ Bot prints detailed logs to console:
 - Avoidances (`constraints` table with `constraint_type='avoid'`)
 - Tee time settings (`tee_time_settings` table)
 
-**Weekly (Reset Each Week)**:
+**Weekly (Reset Each Monday 00:01)**:
 - Time preferences (`participants.preferences` field - cleared with `clear_time_preferences()`)
 - Tee time modifications (`manual_tee_times` and `removed_tee_times` - cleared with `clear_tee_times()`)
+- Published tee sheet (`published_tee_sheet` - cleared with `clear_published_tee_sheet()`)
+- Participants (`participants` table)
 
 **Rationale**: Partner preferences are consistent all season, but time availability changes week-to-week.
+
+### Tee Sheet Stability (Phase 5)
+
+**Problem**: When someone drops out after the tee sheet is published, regenerating from scratch moves everyone to potentially different groups and tee times. Players who already saw the original sheet might turn up at the wrong time.
+
+**Solution**: Published tee sheet with minimal adjustments.
+
+**How it works**:
+1. Saturday 5pm: Tee sheet is generated and saved as `published_tee_sheet`
+2. If someone drops out after publishing: `adjust_tee_sheet()` method is called instead of `generate()`
+3. Adjustment only removes the dropped player and optionally merges their remaining group
+4. Everyone else stays in their same group at the same tee time
+5. If admin wants a full reshuffle: `Randomize` command generates fresh and publishes new sheet
+
+**Minimal Adjustment Algorithm**:
+```python
+def adjust_tee_sheet(published_sheet, current_participants, avoidances):
+    # 1. Find who dropped out and who's new
+    dropped = published_names - current_names
+    new_players = current_names - published_names
+
+    # 2. Remove dropped players from their groups
+    # 3. If group < 3 players, merge into nearest group with space
+    # 4. Add new players to groups with space
+    # 5. Mark sheet as "(UPDATED)" with changes listed
+```
+
+**When `show_tee_sheet` is called**:
+- If published sheet exists → use `adjust_tee_sheet()` (minimal changes)
+- If no published sheet → use `generate()` (fresh generation)
+- If admin sends `Randomize` → use `generate()` and publish as new sheet
 
 ### Additive Tee Time System
 
@@ -648,8 +724,17 @@ def generate_tee_times(self) -> List[str]:
 - `clear_time_preferences()` - Clear early/late from all participants (keeps partner prefs)
 - `clear_participants()` - Clear all participants AND time preferences
 
+**Published Tee Sheet Management**:
+- `save_published_tee_sheet(groups, assigned_times, tee_sheet_text)` - Save published sheet
+- `get_published_tee_sheet()` - Get published sheet (or None)
+- `clear_published_tee_sheet()` - Clear published sheet (weekly reset or before randomize)
+
+**Tee Sheet Adjustment**:
+- `TeeSheetGenerator.adjust_tee_sheet(published, participants, avoidances)` - Minimal adjustment
+- Returns `(formatted_text, had_changes)` - whether changes were needed
+
 ---
 
 **Last Updated**: February 2026
-**Version**: 5.1 (Phases 1-4 Complete + Additive Tee Times + Weekly Time Prefs)
+**Version**: 5.1 (Phase 5 - Tee Sheet Stability & AI Upgrade)
 **Author**: Golf Swindle Bot Development Team

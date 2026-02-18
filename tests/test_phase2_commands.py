@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Test Phase 2 manual adjustment commands"""
 
-import sys
-sys.path.insert(0, '/home/phatwell/projects/golf-swindle-bot')
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from swindle_bot_v5_admin import AdminCommandHandler
-import os
 
 print("="*60)
 print(" TESTING PHASE 2 MANUAL ADJUSTMENT COMMANDS")

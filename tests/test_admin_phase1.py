@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Test Phase 1: Admin Commands"""
 
-import sys
-sys.path.insert(0, '/home/phatwell/projects/golf-swindle-bot')
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from swindle_bot_v5_admin import AdminCommandHandler, Config
-import os
 
 print("="*60)
 print(" TESTING PHASE 1: ADMIN COMMANDS")
@@ -70,7 +69,7 @@ print("="*60)
 
 print("\n✅ Ready to test with real bot!")
 print("\nNext steps:")
-print("1. Make sure 'Sunday Swindle Bot Admin' WhatsApp group exists")
+print("1. Make sure 'Your Golf Group - Admin' WhatsApp group exists")
 print("2. Add your number to ADMIN_USERS in config")
 print("3. Run: python3 swindle_bot_v5_admin.py")
 print("4. In admin group, try: 'Show list' or 'Show tee sheet'")

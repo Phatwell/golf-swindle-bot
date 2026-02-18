@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Test the full startup sequence"""
 
-import sys
-sys.path.insert(0, '/home/phatwell/projects/golf-swindle-bot')
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from swindle_bot import WhatsAppBot, Config
 import time
@@ -35,7 +35,7 @@ print("\n=== Now trying to monitor (get messages) ===")
 for i in range(3):
     print(f"\n--- Attempt {i+1} ---")
     try:
-        messages = bot_whatsapp.get_group_messages("Sunday Swindle")
+        messages = bot_whatsapp.get_group_messages("Your Golf Group")
 
         if messages is None:
             print(f"❌ RESULT: None (failure)")

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Test grouping with 14 players (should create 2x4 and 2x3)"""
 
-import sys
-sys.path.insert(0, '/home/phatwell/projects/golf-swindle-bot')
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from swindle_bot_v5_admin import TeeSheetGenerator, Config
 

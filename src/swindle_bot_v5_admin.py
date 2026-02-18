@@ -9,7 +9,7 @@ import sqlite3
 import subprocess
 import time
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional, Dict
 import schedule
 import threading
@@ -62,6 +62,11 @@ class Config:
         DEFAULT_START_TIME = _config.DEFAULT_START_TIME
         DEFAULT_INTERVAL_MINUTES = _config.DEFAULT_INTERVAL_MINUTES
         DEFAULT_NUM_SLOTS = _config.DEFAULT_NUM_SLOTS
+        MAX_MESSAGES = _config.MAX_MESSAGES
+        MAIN_GROUP_CHECK_MINUTES = _config.MAIN_GROUP_CHECK_MINUTES
+        ADMIN_GROUP_CHECK_SECONDS = _config.ADMIN_GROUP_CHECK_SECONDS
+        ADMIN_BURST_DURATION_SECONDS = _config.ADMIN_BURST_DURATION_SECONDS
+        ADMIN_BURST_CHECK_SECONDS = _config.ADMIN_BURST_CHECK_SECONDS
     except (ImportError, AttributeError) as e:
         # Use safe defaults if config.py doesn't exist
         print("⚠️  Warning: config.py not found. Please copy config.example.py to config.py")
@@ -75,6 +80,11 @@ class Config:
         DEFAULT_START_TIME = "08:00"
         DEFAULT_INTERVAL_MINUTES = 8
         DEFAULT_NUM_SLOTS = 10
+        MAX_MESSAGES = 200
+        MAIN_GROUP_CHECK_MINUTES = 180
+        ADMIN_GROUP_CHECK_SECONDS = 60
+        ADMIN_BURST_DURATION_SECONDS = 180
+        ADMIN_BURST_CHECK_SECONDS = 5
         DB_PATH = "golf_swindle.db"
         CHROME_RESTART_HOURS = 24
 
@@ -85,9 +95,13 @@ class Database:
         self.db_path = db_path
         self.init_db()
 
+    def _connect(self):
+        """Get a database connection. Always use with try/finally to ensure close."""
+        return sqlite3.connect(self.db_path, timeout=10)
+
     def init_db(self):
         """Initialize simplified database"""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         cursor = conn.cursor()
 
         # Simple participants table
@@ -173,12 +187,21 @@ class Database:
             )
         """)
 
+        # Published tee sheet (for stability after Saturday 5pm)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS published_tee_sheet (
+                id INTEGER PRIMARY KEY,
+                sheet_json TEXT NOT NULL,
+                published_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         conn.commit()
         conn.close()
 
     def get_participants(self) -> List[Dict]:
         """Get all participants"""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         cursor = conn.cursor()
         cursor.execute("SELECT name, guests, preferences FROM participants ORDER BY name")
         rows = cursor.fetchall()
@@ -196,26 +219,23 @@ class Database:
 
     def update_participants(self, players: List[Dict]):
         """Replace all participants with new list from AI"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-
-        # Clear existing
-        cursor.execute("DELETE FROM participants")
-
-        # Insert new
-        for player in players:
-            guests_json = json.dumps(player.get('guests', []))
-            cursor.execute("""
-                INSERT INTO participants (name, guests, preferences, updated_at)
-                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-            """, (player['name'], guests_json, player.get('preferences')))
-
-        conn.commit()
-        conn.close()
+        conn = self._connect()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM participants")
+            for player in players:
+                guests_json = json.dumps(player.get('guests', []))
+                cursor.execute("""
+                    INSERT INTO participants (name, guests, preferences, updated_at)
+                    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                """, (player['name'], guests_json, player.get('preferences')))
+            conn.commit()
+        finally:
+            conn.close()
 
     def clear_participants(self):
         """Clear all participants for new week (also clears time preferences)"""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         cursor = conn.cursor()
         cursor.execute("DELETE FROM participants")
         cursor.execute("DELETE FROM last_snapshot")
@@ -224,7 +244,7 @@ class Database:
 
     def clear_time_preferences(self):
         """Clear time preferences from all participants (keeps participants, only clears early/late)"""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         cursor = conn.cursor()
 
         # Get all participants
@@ -240,32 +260,35 @@ class Database:
 
     def save_snapshot(self, messages: List[Dict]):
         """Save messages snapshot for change detection"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM last_snapshot")
-        cursor.execute("""
-            INSERT INTO last_snapshot (id, messages_json, analyzed_at)
-            VALUES (1, ?, CURRENT_TIMESTAMP)
-        """, (json.dumps(messages),))
-        conn.commit()
-        conn.close()
+        conn = self._connect()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM last_snapshot")
+            cursor.execute("""
+                INSERT INTO last_snapshot (id, messages_json, analyzed_at)
+                VALUES (1, ?, CURRENT_TIMESTAMP)
+            """, (json.dumps(messages),))
+            conn.commit()
+        finally:
+            conn.close()
 
     def get_last_snapshot(self) -> Optional[List[Dict]]:
         """Get last messages snapshot"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute("SELECT messages_json FROM last_snapshot WHERE id = 1")
-        row = cursor.fetchone()
-        conn.close()
-
-        if row:
-            return json.loads(row[0])
-        return None
+        conn = self._connect()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT messages_json FROM last_snapshot WHERE id = 1")
+            row = cursor.fetchone()
+            if row:
+                return json.loads(row[0])
+            return None
+        finally:
+            conn.close()
 
     def add_player_manually(self, name: str, guests: List[str] = None, preferences: str = None) -> bool:
         """Manually add a player to the list"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
 
             guests_json = json.dumps(guests or [])
@@ -284,7 +307,7 @@ class Database:
     def remove_player_manually(self, name: str) -> bool:
         """Manually remove a player from the list"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
             cursor.execute("DELETE FROM participants WHERE name = ?", (name,))
             rows_affected = cursor.rowcount
@@ -298,7 +321,7 @@ class Database:
     def add_guest_manually(self, host_name: str, guest_name: str) -> bool:
         """Manually add a guest to a player's list"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
 
             # Get current guests
@@ -329,7 +352,7 @@ class Database:
     def remove_guest_manually(self, guest_name: str, host_name: str = None) -> bool:
         """Manually remove a guest (from specific host or all hosts)"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
 
             if host_name:
@@ -381,7 +404,7 @@ class Database:
     def add_constraint(self, constraint_type: str, player_name: str, target_name: str = None, value: str = None) -> bool:
         """Add a constraint (partner preference, avoid, skill level, etc.)"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
 
             # Check if constraint already exists
@@ -416,7 +439,7 @@ class Database:
     def remove_constraint(self, constraint_type: str, player_name: str, target_name: str = None) -> bool:
         """Remove a constraint"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
 
             if target_name:
@@ -441,7 +464,7 @@ class Database:
     def get_constraints(self, player_name: str = None) -> List[Dict]:
         """Get all active constraints (optionally for a specific player)"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
 
             if player_name:
@@ -476,14 +499,15 @@ class Database:
             return []
 
     def get_partner_preferences(self) -> Dict[str, List[str]]:
-        """Get all partner preferences as a dict {player: [preferred_partners]}"""
+        """Get all partner preferences as a dict {player: [preferred_partners]}
+        Includes both season-long partner_preference and weekly_pairing constraints."""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT player_name, target_name
                 FROM constraints
-                WHERE constraint_type = 'partner_preference' AND active = 1
+                WHERE constraint_type IN ('partner_preference', 'weekly_pairing') AND active = 1
             """)
             rows = cursor.fetchall()
             conn.close()
@@ -492,16 +516,51 @@ class Database:
             for player, target in rows:
                 if player not in preferences:
                     preferences[player] = []
-                preferences[player].append(target)
+                if target not in preferences[player]:
+                    preferences[player].append(target)
             return preferences
         except Exception as e:
             print(f"❌ Error getting partner preferences: {e}")
             return {}
 
+    def save_weekly_pairings(self, pairings: List[list]):
+        """Save AI-detected MP pairings as weekly constraints.
+        These reset every Monday unlike season-long partner preferences."""
+        if not pairings:
+            return
+        try:
+            conn = self._connect()
+            cursor = conn.cursor()
+            # Clear previous weekly pairings before adding new ones
+            cursor.execute("DELETE FROM constraints WHERE constraint_type = 'weekly_pairing'")
+            for pair in pairings:
+                if len(pair) == 2:
+                    p1, p2 = pair[0], pair[1]
+                    cursor.execute("""
+                        INSERT INTO constraints (constraint_type, player_name, target_name, active)
+                        VALUES ('weekly_pairing', ?, ?, 1)
+                    """, (p1, p2))
+                    print(f"   🤝 MP pairing detected: {p1} ↔ {p2}")
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"❌ Error saving weekly pairings: {e}")
+
+    def clear_weekly_pairings(self):
+        """Clear all AI-detected weekly pairings"""
+        try:
+            conn = self._connect()
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM constraints WHERE constraint_type = 'weekly_pairing'")
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"❌ Error clearing weekly pairings: {e}")
+
     def get_avoidances(self) -> Dict[str, List[str]]:
         """Get all avoidances as a dict {player: [players_to_avoid]}"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT player_name, target_name
@@ -526,7 +585,7 @@ class Database:
     def get_tee_time_settings(self) -> Optional[Dict]:
         """Get active tee time settings"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT start_time, interval_minutes, num_slots
@@ -552,7 +611,7 @@ class Database:
     def set_tee_time_settings(self, start_time: str, interval_minutes: int, num_slots: int) -> bool:
         """Set new tee time settings (deactivates previous settings)"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
 
             # Deactivate all previous settings
@@ -603,8 +662,10 @@ class Database:
     def add_manual_tee_time(self, time_str: str) -> bool:
         """Add a single tee time manually"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
+            # Remove from removed list if it was previously removed
+            cursor.execute("DELETE FROM removed_tee_times WHERE tee_time = ?", (time_str,))
             cursor.execute("""
                 INSERT INTO manual_tee_times (tee_time)
                 VALUES (?)
@@ -613,13 +674,18 @@ class Database:
             conn.close()
             return True
         except sqlite3.IntegrityError:
-            # Time already exists
-            return False
+            # Time already exists in manual list, but still clear from removed
+            conn = self._connect()
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM removed_tee_times WHERE tee_time = ?", (time_str,))
+            conn.commit()
+            conn.close()
+            return True
 
     def remove_manual_tee_time(self, time_str: str) -> bool:
         """Mark a tee time as removed (works for auto-generated or manually added times)"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
 
             # First, remove from manual_tee_times if it exists there
@@ -640,7 +706,7 @@ class Database:
 
     def get_manual_tee_times(self) -> List[str]:
         """Get all manually added tee times"""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         cursor = conn.cursor()
         cursor.execute("SELECT tee_time FROM manual_tee_times ORDER BY tee_time")
         times = [row[0] for row in cursor.fetchall()]
@@ -649,7 +715,7 @@ class Database:
 
     def get_removed_tee_times(self) -> List[str]:
         """Get all removed tee times"""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         cursor = conn.cursor()
         cursor.execute("SELECT tee_time FROM removed_tee_times ORDER BY tee_time")
         times = [row[0] for row in cursor.fetchall()]
@@ -658,13 +724,72 @@ class Database:
 
     def clear_manual_tee_times(self) -> bool:
         """Clear all manually added and removed tee times (reset to pure auto-generation)"""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         cursor = conn.cursor()
         cursor.execute("DELETE FROM manual_tee_times")
         cursor.execute("DELETE FROM removed_tee_times")
         conn.commit()
         conn.close()
         return True
+
+    # ==================== PUBLISHED TEE SHEET ====================
+
+    def save_published_tee_sheet(self, groups: List, assigned_times: Dict, tee_sheet_text: str):
+        """Save the published tee sheet for stability after publishing"""
+        # Convert groups to serializable format
+        sheet_data = {
+            'groups': [],
+            'tee_sheet_text': tee_sheet_text
+        }
+        for group in groups:
+            group_data = {
+                'tee_time': assigned_times.get(id(group), 'TBC'),
+                'players': []
+            }
+            for player in group:
+                group_data['players'].append({
+                    'name': player['name'],
+                    'is_guest': player.get('is_guest', False),
+                    'brought_by': player.get('brought_by')
+                })
+            sheet_data['groups'].append(group_data)
+
+        conn = self._connect()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM published_tee_sheet")
+            cursor.execute("""
+                INSERT INTO published_tee_sheet (id, sheet_json, published_at)
+                VALUES (1, ?, CURRENT_TIMESTAMP)
+            """, (json.dumps(sheet_data),))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_published_tee_sheet(self) -> Optional[Dict]:
+        """Get the published tee sheet if one exists"""
+        conn = self._connect()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT sheet_json, published_at FROM published_tee_sheet WHERE id = 1")
+            row = cursor.fetchone()
+            if row:
+                data = json.loads(row[0])
+                data['published_at'] = row[1]
+                return data
+            return None
+        finally:
+            conn.close()
+
+    def clear_published_tee_sheet(self):
+        """Clear the published tee sheet (for new week or randomize)"""
+        conn = self._connect()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM published_tee_sheet")
+            conn.commit()
+        finally:
+            conn.close()
 
 
 # ==================== AI ANALYZER ====================
@@ -744,96 +869,37 @@ class AIAnalyzer:
             for msg in final_messages
         ])
 
-        prompt = f"""You are analyzing messages from a golf WhatsApp group for their weekly Sunday game.
-
-MESSAGES (Monday through Sunday morning):
-{messages_text}
-
-MESSAGE FORMAT EXPLANATION:
-Each message shows: [SenderName]: message text
-- The name in [brackets] is the WhatsApp contact name
-- **ALWAYS use this exact name as the player name when they confirm playing**
-- Example: [Chris Hatwell]: "I'm in" means player name is "Chris Hatwell"
-
-TASK: Analyze ALL messages and determine who is playing this Sunday.
-
-CRITICAL FIRST STEPS - APPLY THESE FILTERS IN ORDER:
-1. Find the message where someone says "now taking names for Sunday" or "taking names" - this is the ORGANIZER starting signup
-2. IGNORE all messages BEFORE this organizer message - they are about previous games
-3. **FILTER OUT QUOTED/THREADED REPLIES**:
-   - WhatsApp threaded replies often quote another person's message
-   - **If a message text starts with another person's name from an earlier message, it's a QUOTE - SKIP IT COMPLETELY**
-   - Example: [Segan]: "Ricky Parkhurst\nMorning all, now taking names..." → This quotes Ricky's message, IGNORE THIS ENTIRE MESSAGE from Segan
-   - Only analyze messages that contain the sender's OWN original words
-4. Only analyze messages AFTER filtering out pre-signup messages and quoted replies
+        system_prompt = """You extract golf signup data from WhatsApp messages. Be deterministic and precise.
 
 RULES:
-1. **CRITICAL - USE SENDER NAMES**: The player "name" field MUST be the exact [SenderName] from brackets
-   - [John]: "I'm in" → player name is "John"
-   - [Chris Hatwell]: "Yes please" → player name is "Chris Hatwell"
-   - [Mike Smith]: "Count me in" → player name is "Mike Smith"
-   - NEVER use "unknown player" or generic names
+1. Player names = exact [SenderName] from brackets. Never invent names.
+2. ORGANIZER posts "now taking names" - NOT a player unless they separately sign up.
+3. Only messages AFTER "taking names" count. Earlier messages are previous weeks.
+4. Latest message per person = truth (people change minds).
+5. Skip [Unknown] senders.
+6. PLAYING: "I'm in", "yes please", "count me in", "please", "me", "yes"
+7. NOT PLAYING: "I'm out", "can't make it", illness mentions
+8. IGNORE: questions, banter, emoji reactions, organisational chat
+9. Quoted messages: text before sender's own words is a QUOTE - only use sender's own words.
+10. Guests: "+1" → "[HostName]-Guest". "bringing [Name]" → named guest. If guest also signs up independently, list them as own player only.
+11. Note early/late preferences if mentioned.
+12. MP/Match Play pairings: When someone says "me and [Name] for MP" or similar, both are playing AND want to be paired together. Add to "pairings" array as [sender, named_player]. The named player may not be the exact sender name - use the name as written in the message."""
 
-2. Latest message from each person is the truth (people change their minds)
+        user_prompt = f"""MESSAGES:
+{messages_text}
 
-3. Identify the ORGANIZER:
-   - The person who posts "now taking names for Sunday" is the ORGANIZER
-   - **DO NOT include the organizer as a player** unless they explicitly say "I'm in" or "yes please" in a SEPARATE message
-   - Organizer messages like "all on the list", "everyone confirmed" are NOT signups
-
-4. Understand natural language:
-   - "I'm in", "yes please", "count me in", "I'll be there", "please" = PLAYING
-   - "I'm out", "can't make it", "not playing", illness mentions = NOT PLAYING
-   - Ignore messages that are just questions or organizational chat (not playing confirmations)
-
-5. Track guests CAREFULLY:
-   - "+1", "plus 1" = 1 unnamed guest (use "[Host]-Guest" format)
-   - "bringing [Name]" or "with [Name]" = named guest
-   - Guests MUST be in the array of whoever mentioned bringing them
-
-6. Guest examples:
-   - [Alex]: "I'm in +1" → player "Alex" with guests: ["Alex-Guest"]
-   - [John]: "Me please, bringing Tom" → player "John" with guests: ["Tom"]
-   - [Mike]: "Count me in with Dave and Steve" → player "Mike" with guests: ["Dave", "Steve"]
-
-7. Note preferences:
-   - Tee time preferences (early/late)
-   - Playing partners
-
-8. If someone says they're out, remove them AND their guests
-
-9. Skip messages where [Unknown] is the sender - these are system/bot messages
-
-10. **HANDLE GUEST DUPLICATES**: If someone is mentioned as a guest BUT also sends their own signup message:
-   - Remove them from the guest list
-   - Only include them as their own player (not as a guest)
-   - Example: [Maice]: "Me and Ken" + [KennyD]: "I'm in" → Ken is only listed under KennyD, NOT as Maice's guest
-   - Check for name variations: "Ken" and "KennyD" are likely the same person
-
-IMPORTANT:
-- Every player "name" must match a [SenderName] from the messages
-- Guests belong to whoever mentioned them
-- Never invent player names - only use actual [SenderName] values
-
-OUTPUT (valid JSON only, no markdown):
-{{
-    "players": [
-        {{"name": "PlayerName", "guests": ["GuestName1", "GuestName2"], "preferences": "any preferences or null"}}
-    ],
-    "total_count": number,
-    "summary": "brief summary of who's playing",
-    "changes": ["list", "of", "notable", "changes"]
-}}
-
-Return ONLY the JSON, nothing else."""
+Return ONLY valid JSON:
+{{"players": [{{"name": "SenderName", "guests": [], "preferences": null}}], "pairings": [["Player1", "Player2"]], "total_count": 0, "summary": "", "changes": []}}"""
 
         try:
             response = self.client.messages.create(
-                model="claude-haiku-4-5-20251001",  # Fast and cheap for this task
-                max_tokens=2000,
+                model="claude-sonnet-4-5-20250929",
+                max_tokens=1000,
+                temperature=0,
+                system=system_prompt,
                 messages=[{
                     "role": "user",
-                    "content": prompt
+                    "content": user_prompt
                 }]
             )
 
@@ -878,105 +944,25 @@ class AdminCommandHandler:
         }
         """
 
-        prompt = f"""You are processing an admin command for a golf booking system.
+        admin_system = """Parse golf admin commands into JSON. Extract exact names/values as written.
 
-COMMAND: "{message}"
-FROM: {sender}
+Commands: show_list, show_tee_sheet, add_player(player_name), remove_player(player_name), add_guest(guest_name,host_name), remove_guest(guest_name), set_partner_preference(player_name,target_name), remove_partner_preference(player_name), set_avoidance(player_name,target_name), remove_avoidance(player_name), show_constraints, set_tee_times(start_time,interval_minutes,num_slots), show_tee_times, set_time_preference(player_name,time_preference=early|late), add_tee_time(tee_time), remove_tee_time(tee_time), clear_tee_times, clear_time_preferences, swap_players(player_name,target_name), move_player(player_name,group_number), randomize, unknown
 
-Determine the user's intent and extract any parameters.
+swap_players: "swap X with Y", "switch X and Y" - swaps two players between their groups on the tee sheet
+move_player: "move X to group 3", "put X in group 2", "move X to the 3 ball" - moves a single player from their current group to a specified group number
+randomize: "randomize", "shuffle", "reshuffle", "new tee sheet", "regenerate" - creates a completely new random tee sheet"""
 
-SUPPORTED COMMANDS:
-1. "show_list" - Show current participants
-   Triggers: "show list", "who's playing", "who's in", "current list", etc.
+        admin_user_prompt = f"""COMMAND: "{message}"
 
-2. "show_tee_sheet" - Show tee time groupings
-   Triggers: "show tee sheet", "what's the tee sheet", "show groups", "tee times", etc.
-
-3. "add_player" - Manually add a player
-   Triggers: "add John Smith", "add player Mike", "put John in", etc.
-   Extract: player_name from the command
-
-4. "remove_player" - Manually remove a player
-   Triggers: "remove John Smith", "take out Mike", "delete player Alex", etc.
-   Extract: player_name from the command
-
-5. "add_guest" - Add a guest for a player
-   Triggers: "add guest Tom for Alex", "Alex bringing John", "add John as guest of Mike", etc.
-   Extract: guest_name, host_name from the command
-
-6. "remove_guest" - Remove a guest
-   Triggers: "remove guest Tom", "remove Tom from Alex", "delete guest for Mike", etc.
-   Extract: guest_name, and optionally host_name
-
-7. "set_partner_preference" - Set preferred playing partner
-   Triggers: "Mike plays with John", "pair Mike with John", "Mike prefers John", etc.
-   Extract: player_name, target_name
-
-8. "remove_partner_preference" - Remove partner preference
-   Triggers: "remove Mike's partner preference", "Mike doesn't need to play with John", etc.
-   Extract: player_name, optionally target_name
-
-9. "set_avoidance" - Set players to avoid pairing
-   Triggers: "don't pair Mike with John", "keep Mike away from John", "Mike avoids John", etc.
-   Extract: player_name, target_name
-
-10. "remove_avoidance" - Remove avoidance
-    Triggers: "remove avoidance for Mike", "Mike can play with John now", etc.
-    Extract: player_name, optionally target_name
-
-11. "show_constraints" - Show all constraints
-    Triggers: "show constraints", "show preferences", "show pairings", etc.
-
-12. "set_tee_times" - Configure tee time settings
-    Triggers: "set tee times from 8:00", "tee times start at 8am", "configure tee times", etc.
-    Extract: start_time, interval_minutes, num_slots
-
-13. "show_tee_times" - Show current tee time settings
-    Triggers: "show tee times", "what are the tee times", "tee time settings", etc.
-
-14. "set_time_preference" - Set player's time preference
-    Triggers: "Mike prefers early", "Dave wants late tee time", "Alex needs early morning", etc.
-    Extract: player_name, time_preference ("early" or "late")
-
-15. "add_tee_time" - Add a single tee time manually
-    Triggers: "add tee time 08:24", "add 08:32", "add time 09:00", etc.
-    Extract: tee_time in HH:MM format
-
-16. "remove_tee_time" - Remove a single tee time
-    Triggers: "remove tee time 08:24", "remove 08:32", "delete time 09:00", etc.
-    Extract: tee_time in HH:MM format
-
-17. "clear_tee_times" - Clear all manually added tee times (reverts to auto-generation)
-    Triggers: "clear tee times", "reset tee times", "remove all times", etc.
-
-18. "clear_time_preferences" - Clear all time preferences for new week (keeps partner preferences)
-    Triggers: "clear time preferences", "reset time prefs", "clear early/late", "new week", etc.
-
-OUTPUT (valid JSON only):
-{{
-    "command": "show_list" | "show_tee_sheet" | "add_player" | "remove_player" | "add_guest" | "remove_guest" | "set_partner_preference" | "remove_partner_preference" | "set_avoidance" | "remove_avoidance" | "show_constraints" | "set_tee_times" | "show_tee_times" | "set_time_preference" | "add_tee_time" | "remove_tee_time" | "clear_tee_times" | "clear_time_preferences" | "unknown",
-    "confidence": "high" | "medium" | "low",
-    "params": {{
-        "player_name": "extracted name if applicable",
-        "guest_name": "extracted guest name if applicable",
-        "host_name": "extracted host name if applicable",
-        "target_name": "extracted target player name if applicable",
-        "start_time": "HH:MM format if applicable",
-        "interval_minutes": "integer if applicable",
-        "num_slots": "integer if applicable",
-        "time_preference": "early or late if applicable",
-        "tee_time": "HH:MM format if applicable"
-    }},
-    "needs_response": true
-}}
-
-Return ONLY the JSON."""
+Return ONLY JSON: {{"command":"show_list|show_tee_sheet|add_player|remove_player|add_guest|remove_guest|set_partner_preference|remove_partner_preference|set_avoidance|remove_avoidance|show_constraints|set_tee_times|show_tee_times|set_time_preference|add_tee_time|remove_tee_time|clear_tee_times|clear_time_preferences|swap_players|move_player|randomize|unknown","confidence":"high|medium|low","params":{{}},"needs_response":true}}"""
 
         try:
             response = self.client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=500,
-                messages=[{"role": "user", "content": prompt}]
+                model="claude-sonnet-4-5-20250929",
+                max_tokens=300,
+                temperature=0,
+                system=admin_system,
+                messages=[{"role": "user", "content": admin_user_prompt}]
             )
 
             result_text = response.content[0].text.strip()
@@ -1199,7 +1185,7 @@ class WhatsAppBot:
             message_elements_out = self.driver.find_elements(By.CSS_SELECTOR, '.message-out')
             message_elements = message_elements_in + message_elements_out
 
-            for elem in message_elements[-100:]:  # Last 100 messages
+            for elem in message_elements[-Config.MAX_MESSAGES:]:
                 try:
                     # Check if this is an outgoing message
                     is_outgoing = 'message-out' in elem.get_attribute('class')
@@ -1274,7 +1260,8 @@ class WhatsAppBot:
                     if text and text.strip():
                         messages.append({
                             'sender': sender,
-                            'text': text
+                            'text': text,
+                            'is_outgoing': is_outgoing
                         })
                 except Exception as e:
                     # Debug: print parse errors
@@ -1526,6 +1513,11 @@ class TeeSheetGenerator:
             else:
                 neutral_groups.append(group)
 
+        # Within each category, sort smaller groups first (3-balls before 4-balls)
+        early_groups.sort(key=len)
+        neutral_groups.sort(key=len)
+        late_groups.sort(key=len)
+
         # Assign tee times: early groups first, then neutral, then late groups
         assigned_times = {}
         time_idx = 0
@@ -1549,16 +1541,19 @@ class TeeSheetGenerator:
                 time_idx += 1
 
         # Format tee sheet
-        lines = ["🏌️ *SUNDAY SWINDLE TEE SHEET* 🏌️\n"]
+        lines = [f"🏌️ *{self.config.GROUP_NAME.upper()} TEE SHEET* 🏌️\n"]
         lines.append(f"📅 {datetime.now().strftime('%d/%m/%Y')}\n")
         lines.append(f"👥 {total_players} players, {len(tee_groups)} groups\n")
 
-        # Show tee time utilization
+        # Show tee time utilization - list which times can be returned
         used_slots = len(tee_groups)
         total_slots = len(available_tee_times)
         available_slots = total_slots - used_slots
         if available_slots > 0:
-            lines.append(f"✅ {available_slots} tee time(s) can be returned\n")
+            # The returned times are the ones after the last used slot
+            returned_times = available_tee_times[used_slots:]
+            returned_str = ', '.join(returned_times)
+            lines.append(f"✅ {available_slots} tee time(s) can be returned: {returned_str}\n")
 
         all_groups = early_groups + neutral_groups + late_groups
 
@@ -1573,6 +1568,143 @@ class TeeSheetGenerator:
                     lines.append(f"  • {player['name']}")
 
         return '\n'.join(lines), all_groups, assigned_times
+
+    def adjust_tee_sheet(self, published_sheet: Dict, current_participants: List[Dict], avoidances: Dict) -> str:
+        """
+        Minimally adjust a published tee sheet when players drop out or are added.
+        Keeps everyone else in their same group and tee time.
+        """
+        groups = published_sheet['groups']
+
+        # Build set of current player names (including guests)
+        current_names = set()
+        for p in current_participants:
+            current_names.add(p['name'])
+            for g in p.get('guests', []):
+                current_names.add(g)
+
+        # Build set of players in the published sheet
+        published_names = set()
+        for group in groups:
+            for player in group['players']:
+                published_names.add(player['name'])
+
+        # Find who dropped out and who's new
+        dropped = published_names - current_names
+        new_players = current_names - published_names
+
+        if not dropped and not new_players:
+            # No changes - return original sheet
+            return published_sheet.get('tee_sheet_text', ''), False
+
+        # Remove dropped players from their groups
+        for group in groups:
+            group['players'] = [p for p in group['players'] if p['name'] not in dropped]
+            # Also remove guests of dropped hosts
+            group['players'] = [p for p in group['players']
+                               if not (p.get('is_guest') and p.get('brought_by') in dropped)]
+
+        # Remove empty groups
+        groups = [g for g in groups if len(g['players']) > 0]
+
+        # Handle groups that are now too small (< 3 players)
+        small_groups = [g for g in groups if len(g['players']) < 3]
+        ok_groups = [g for g in groups if len(g['players']) >= 3]
+
+        # Try to merge small groups into adjacent groups that have space
+        for small_group in small_groups:
+            merged = False
+            # Try groups with space, preferring groups at nearby tee times
+            for target in sorted(ok_groups, key=lambda g: len(g['players'])):
+                if len(target['players']) + len(small_group['players']) <= self.config.MAX_GROUP_SIZE:
+                    # Check avoidance constraints
+                    small_names = [p['name'] for p in small_group['players']]
+                    target_names = [p['name'] for p in target['players']]
+                    has_conflict = False
+                    for n1 in small_names:
+                        for n2 in target_names:
+                            if n1 in avoidances and n2 in avoidances[n1]:
+                                has_conflict = True
+                            if n2 in avoidances and n1 in avoidances[n2]:
+                                has_conflict = True
+                    if not has_conflict:
+                        target['players'].extend(small_group['players'])
+                        merged = True
+                        break
+
+            if not merged:
+                # Keep the small group as-is (better than moving lots of people)
+                ok_groups.append(small_group)
+
+        groups = ok_groups
+
+        # Add new players to groups with space
+        new_player_data = []
+        for p in current_participants:
+            if p['name'] in new_players:
+                new_player_data.append({'name': p['name'], 'is_guest': False, 'brought_by': None})
+                for g in p.get('guests', []):
+                    if g in new_players:
+                        new_player_data.append({'name': g, 'is_guest': True, 'brought_by': p['name']})
+
+        for new_p in new_player_data:
+            if new_p.get('is_guest'):
+                continue  # Guests get added with their host
+            placed = False
+            # Try existing groups with space
+            for group in sorted(groups, key=lambda g: len(g['players'])):
+                if len(group['players']) < self.config.MAX_GROUP_SIZE:
+                    # Check avoidances
+                    group_names = [p['name'] for p in group['players']]
+                    has_conflict = any(
+                        (new_p['name'] in avoidances and n in avoidances[new_p['name']]) or
+                        (n in avoidances and new_p['name'] in avoidances[n])
+                        for n in group_names
+                    )
+                    if not has_conflict:
+                        group['players'].append(new_p)
+                        # Add their guests too
+                        for gp in new_player_data:
+                            if gp.get('brought_by') == new_p['name']:
+                                group['players'].append(gp)
+                        placed = True
+                        break
+            if not placed:
+                # Create a new group at the end
+                groups.append({
+                    'tee_time': 'TBC',
+                    'players': [new_p] + [gp for gp in new_player_data if gp.get('brought_by') == new_p['name']]
+                })
+
+        # Remove empty groups again
+        groups = [g for g in groups if len(g['players']) > 0]
+
+        # Count total players
+        total_players = sum(len(g['players']) for g in groups)
+
+        # Format the adjusted tee sheet
+        changes = []
+        if dropped:
+            changes.append(f"Removed: {', '.join(dropped)}")
+        if new_players:
+            changes.append(f"Added: {', '.join(new_players)}")
+
+        lines = [f"🏌️ *{self.config.GROUP_NAME.upper()} TEE SHEET (UPDATED)* 🏌️\n"]
+        lines.append(f"📅 {datetime.now().strftime('%d/%m/%Y')}\n")
+        lines.append(f"👥 {total_players} players, {len(groups)} groups\n")
+        if changes:
+            lines.append(f"🔄 Changes: {'; '.join(changes)}\n")
+
+        for i, group in enumerate(groups):
+            tee_time = group.get('tee_time', 'TBC')
+            lines.append(f"\n⏰ *Group {i + 1} - {tee_time}*")
+            for player in group['players']:
+                if player.get('is_guest'):
+                    lines.append(f"  • {player['name']} (guest of {player['brought_by']})")
+                else:
+                    lines.append(f"  • {player['name']}")
+
+        return '\n'.join(lines), True
 
 
 # ==================== MAIN BOT ====================
@@ -1589,6 +1721,59 @@ class SwindleBot:
         self.running = True
         self.last_admin_check = None  # Track last admin message processed
 
+        # Blocklist of known bot response prefixes (after emoji/markdown stripping)
+        # These are how bot responses look when WhatsApp strips formatting
+        # Admin commands never start with these phrases
+        self._bot_response_prefixes = [
+            # Status messages
+            "shanks", "admin interface ready", "bot shutting down", "bot restarting",
+            "weekly reset", "sunday swindle", "randomized tee sheet",
+            # Success responses (past tense - commands use present tense)
+            "added ", "removed ", "cleared ", "swapped:", "moved:",
+            "set preference", "set avoidance", "partner preference saved",
+            # Error responses
+            "error:", "failed ",
+            # Warning/info responses
+            "preference already", "preference not found",
+            "avoidance already", "avoidance not found",
+            "already in the participants", "already in group", "already exists",
+            "not found on tee sheet", "not found",
+            "no published tee sheet", "no participants", "no constraints set",
+            "no settings configured",
+            "need both", "need player", "need guest", "need tee time",
+            "need two player", "need a player",
+            "invalid group", "invalid interval",
+            # Tee time responses
+            "tee times configured", "tee time ",
+            "manual tee times", "remaining times", "will now use",
+            # Dynamic content markers
+            "constraints", "tee times", "participants",
+            "player", "guest",
+        ]
+
+    def _clean_for_compare(self, text: str) -> str:
+        """Strip emojis, markdown, and special chars for comparison"""
+        import re
+        # Remove emojis and non-ASCII unicode
+        text = re.sub(r'[^\x00-\x7F]+', '', text)
+        # Remove markdown formatting
+        text = text.replace('*', '').replace('_', '')
+        # Normalize whitespace and lowercase
+        text = ' '.join(text.split()).strip().lower()
+        return text
+
+    def _is_bot_response(self, text: str) -> bool:
+        """Check if a message looks like a bot response rather than an admin command"""
+        # Multi-line or long messages are always bot responses
+        if '\n' in text.strip() or len(text.strip()) > 150:
+            return True
+        # Check cleaned text against blocklist
+        cleaned = self._clean_for_compare(text)
+        for prefix in self._bot_response_prefixes:
+            if cleaned.startswith(prefix):
+                return True
+        return False
+
     def send_to_me(self, message: str):
         """Send message to yourself"""
         self.whatsapp.send_message(self.config.MY_NUMBER, message)
@@ -1597,9 +1782,33 @@ class SwindleBot:
         """Send message to admin group"""
         self.whatsapp.send_to_group(self.config.ADMIN_GROUP_NAME, message)
 
+    def _restart_bot(self):
+        """Restart the bot by re-executing the current script"""
+        import sys
+        print("🔄 Restarting bot process...")
+        try:
+            self.whatsapp.driver.quit()
+        except:
+            pass
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
     def handle_admin_command(self, command_text: str, sender: str):
         """Process and respond to admin command"""
         print(f"📱 Processing: '{command_text[:50]}...'")
+
+        # Direct commands (no AI needed, restricted to first admin user)
+        cmd_lower = command_text.strip().lower()
+        primary_admin = self.config.ADMIN_USERS[0] if self.config.ADMIN_USERS else None
+        if cmd_lower in ('shutdown', 'stop bot', 'kill bot') and sender == primary_admin:
+            print("🛑 Shutdown command received")
+            self.send_to_admin_group("🛑 Bot shutting down...")
+            self.running = False
+            return
+        if cmd_lower in ('restart', 'restart bot', 'reboot') and sender == primary_admin:
+            print("🔄 Restart command received")
+            self.send_to_admin_group("🔄 Bot restarting...")
+            self._restart_bot()
+            return
 
         # Parse command with AI
         result = self.admin_handler.parse_command(command_text, sender)
@@ -1609,20 +1818,40 @@ class SwindleBot:
         print(f"   → Detected: {command} (confidence: {confidence})")
 
         if command == 'show_list':
-            # Generate and send participant list
+            # Refresh from main group first so the list is up to date
+            self.refresh_main_group()
             participant_list = self.generate_participant_list()
             self.send_to_admin_group(participant_list)
             print(f"   ✅ Sent participant list")
 
         elif command == 'show_tee_sheet':
-            # Generate and send tee sheet
+            # Refresh from main group first so the sheet is up to date
+            self.refresh_main_group()
             participants = self.db.get_participants()
-            partner_prefs = self.db.get_partner_preferences()
-            avoidances = self.db.get_avoidances()
-            available_times = self.db.generate_tee_times()
-            tee_sheet, _, _ = self.tee_generator.generate(participants, partner_prefs, avoidances, available_times)
-            self.send_to_admin_group(tee_sheet)
-            print(f"   ✅ Sent tee sheet")
+            published = self.db.get_published_tee_sheet()
+
+            if published:
+                # Published sheet exists - minimally adjust it
+                avoidances = self.db.get_avoidances()
+                tee_sheet, had_changes = self.tee_generator.adjust_tee_sheet(
+                    published, participants, avoidances
+                )
+                if had_changes:
+                    self.send_to_admin_group(tee_sheet)
+                    print(f"   ✅ Sent adjusted tee sheet (minimal changes from published)")
+                else:
+                    self.send_to_admin_group(published.get('tee_sheet_text', tee_sheet))
+                    print(f"   ✅ Sent published tee sheet (no changes)")
+            else:
+                # No published sheet - generate fresh
+                partner_prefs = self.db.get_partner_preferences()
+                avoidances = self.db.get_avoidances()
+                available_times = self.db.generate_tee_times()
+                tee_sheet, _, _ = self.tee_generator.generate(
+                    participants, partner_prefs, avoidances, available_times
+                )
+                self.send_to_admin_group(tee_sheet)
+                print(f"   ✅ Sent fresh tee sheet (no published version)")
 
         elif command == 'add_player':
             # Manually add a player
@@ -1737,7 +1966,10 @@ class SwindleBot:
                 print(f"   ❌ Missing player name")
                 return
 
+            # Try removing season-long preference first, then weekly pairing
             success = self.db.remove_constraint('partner_preference', player_name, target_name)
+            if not success:
+                success = self.db.remove_constraint('weekly_pairing', player_name, target_name)
             if success:
                 target_text = f" with {target_name}" if target_name else ""
                 self.send_to_admin_group(f"✅ Removed preference for {player_name}{target_text}")
@@ -1786,29 +2018,58 @@ class SwindleBot:
                 print(f"   ⚠️  Avoidance not found")
 
         elif command == 'show_constraints':
-            # Show all constraints
+            # Show all constraints with active/inactive status
             constraints = self.db.get_constraints()
             if not constraints:
                 self.send_to_admin_group("📋 *Constraints*\n\nNo constraints set")
                 print(f"   ℹ️  No constraints")
                 return
 
+            # Get current participant names for status check
+            participants = self.db.get_participants()
+            signed_up = set()
+            for p in participants:
+                signed_up.add(p['name'].lower())
+                for g in p.get('guests', []):
+                    signed_up.add(g.lower())
+
+            def player_status(player, target):
+                p_in = player.lower() in signed_up
+                t_in = target.lower() in signed_up if target else False
+                if p_in and t_in:
+                    return "✅"
+                elif p_in or t_in:
+                    who = target if p_in else player
+                    return f"⚠️ {who} not signed up"
+                else:
+                    return "💤 neither signed up"
+
             # Group by type
             partner_prefs = [c for c in constraints if c['type'] == 'partner_preference']
+            weekly_pairings = [c for c in constraints if c['type'] == 'weekly_pairing']
             avoidances = [c for c in constraints if c['type'] == 'avoid']
 
             lines = ["📋 *Constraints*\n"]
 
             if partner_prefs:
-                lines.append("🤝 *Partner Preferences:*")
+                lines.append("🤝 *Partner Preferences (season-long):*")
                 for c in partner_prefs:
-                    lines.append(f"  • {c['player']} plays with {c['target']}")
+                    status = player_status(c['player'], c['target'])
+                    lines.append(f"  • {c['player']} plays with {c['target']}  {status}")
+                lines.append("")
+
+            if weekly_pairings:
+                lines.append("🏌️ *MP Pairings (this week):*")
+                for c in weekly_pairings:
+                    status = player_status(c['player'], c['target'])
+                    lines.append(f"  • {c['player']} ↔ {c['target']}  {status}")
                 lines.append("")
 
             if avoidances:
                 lines.append("⚠️  *Avoidances:*")
                 for c in avoidances:
-                    lines.append(f"  • {c['player']} avoids {c['target']}")
+                    status = player_status(c['player'], c['target'])
+                    lines.append(f"  • {c['player']} avoids {c['target']}  {status}")
 
             self.send_to_admin_group('\n'.join(lines))
             print(f"   ✅ Sent constraints list ({len(constraints)} constraints)")
@@ -1907,14 +2168,18 @@ class SwindleBot:
             for p in participants:
                 if p['name'] == player_name:
                     player_found = True
-                    # Update preferences
-                    current_pref = p.get('preferences', '')
-                    # Remove old time preferences
+                    current_pref = p.get('preferences') or ''
+                    # Remove old time preferences, add new one
                     new_pref = ' '.join([word for word in current_pref.split() if word.lower() not in ['early', 'late']])
                     new_pref = f"{new_pref} {time_pref}".strip()
 
-                    # This is a simplified approach - in production you'd want a proper update method
-                    # For now, just show success
+                    # Save to database
+                    conn = sqlite3.connect(self.db.db_path, timeout=10)
+                    cursor = conn.cursor()
+                    cursor.execute("UPDATE participants SET preferences = ? WHERE name = ?", (new_pref, player_name))
+                    conn.commit()
+                    conn.close()
+
                     self.send_to_admin_group(f"✅ Set {player_name} preference to: {time_pref} tee time")
                     print(f"   ✅ Set {player_name} to {time_pref}")
                     break
@@ -1993,6 +2258,164 @@ class SwindleBot:
             )
             print(f"   ✅ Cleared time preferences (kept {len(participants)} participants)")
 
+        elif command == 'swap_players':
+            # Swap two players between groups on the published tee sheet
+            params = result.get('params', {})
+            player1 = params.get('player_name')
+            player2 = params.get('target_name')
+
+            if not player1 or not player2:
+                self.send_to_admin_group("❌ Error: Need two player names to swap")
+                print(f"   ❌ Missing player names")
+                return
+
+            published = self.db.get_published_tee_sheet()
+            if not published:
+                self.send_to_admin_group("❌ No published tee sheet to swap on. Use 'Show tee sheet' first then 'Randomize' to create one.")
+                print(f"   ❌ No published sheet")
+                return
+
+            groups = published['groups']
+            p1_group = p2_group = p1_idx = p2_idx = None
+
+            for gi, group in enumerate(groups):
+                players = group.get('players', [])
+                for pi, player in enumerate(players):
+                    name = player.get('name', '')
+                    if name.lower() == player1.lower():
+                        p1_group, p1_idx = gi, pi
+                    elif name.lower() == player2.lower():
+                        p2_group, p2_idx = gi, pi
+
+            if p1_group is None:
+                self.send_to_admin_group(f"❌ {player1} not found on tee sheet")
+                return
+            if p2_group is None:
+                self.send_to_admin_group(f"❌ {player2} not found on tee sheet")
+                return
+            if p1_group == p2_group:
+                self.send_to_admin_group(f"⚠️ {player1} and {player2} are already in the same group")
+                return
+
+            # Swap them
+            groups[p1_group]['players'][p1_idx], groups[p2_group]['players'][p2_idx] = \
+                groups[p2_group]['players'][p2_idx], groups[p1_group]['players'][p1_idx]
+
+            # Rebuild tee sheet text
+            total_players = sum(len(g.get('players', [])) for g in groups)
+            lines = [f"🏌️ *{self.config.GROUP_NAME.upper()} TEE SHEET (SWAPPED)* 🏌️\n"]
+            lines.append(f"📅 {datetime.now().strftime('%d/%m/%Y')}\n")
+            lines.append(f"👥 {total_players} players, {len(groups)} groups\n")
+            lines.append(f"🔄 Swapped: {player1} ↔ {player2}\n")
+
+            for i, group in enumerate(groups):
+                tee_time = group.get('tee_time', 'TBC')
+                lines.append(f"\n⏰ *Group {i + 1} - {tee_time}*")
+                for player in group.get('players', []):
+                    if player.get('is_guest'):
+                        lines.append(f"  • {player['name']} (guest of {player.get('brought_by', '?')})")
+                    else:
+                        lines.append(f"  • {player['name']}")
+
+            tee_sheet_text = '\n'.join(lines)
+            # Save updated published sheet
+            assigned_times = {i: g.get('tee_time', 'TBC') for i, g in enumerate(groups)}
+            self.db.save_published_tee_sheet(groups, assigned_times, tee_sheet_text)
+            self.send_to_admin_group(tee_sheet_text)
+            print(f"   ✅ Swapped {player1} ↔ {player2}")
+
+        elif command == 'move_player':
+            # Move a single player to a different group on the published tee sheet
+            params = result.get('params', {})
+            player_name = params.get('player_name')
+            target_group = params.get('group_number')
+
+            if not player_name or target_group is None:
+                self.send_to_admin_group("❌ Error: Need a player name and group number (e.g. 'Move Chris to group 3')")
+                print(f"   ❌ Missing player name or group number")
+                return
+
+            try:
+                target_group = int(target_group)
+            except (ValueError, TypeError):
+                self.send_to_admin_group(f"❌ Invalid group number: {target_group}")
+                return
+
+            published = self.db.get_published_tee_sheet()
+            if not published:
+                self.send_to_admin_group("❌ No published tee sheet. Use 'Show tee sheet' first then 'Randomize' to create one.")
+                print(f"   ❌ No published sheet")
+                return
+
+            groups = published['groups']
+
+            if target_group < 1 or target_group > len(groups):
+                self.send_to_admin_group(f"❌ Group {target_group} doesn't exist. There are {len(groups)} groups.")
+                return
+
+            # Find the player
+            src_group = src_idx = None
+            for gi, group in enumerate(groups):
+                for pi, player in enumerate(group.get('players', [])):
+                    if player.get('name', '').lower() == player_name.lower():
+                        src_group, src_idx = gi, pi
+                        break
+
+            if src_group is None:
+                self.send_to_admin_group(f"❌ {player_name} not found on tee sheet")
+                return
+
+            target_gi = target_group - 1  # Convert to 0-indexed
+            if src_group == target_gi:
+                self.send_to_admin_group(f"⚠️ {player_name} is already in group {target_group}")
+                return
+
+            # Move the player
+            player_data = groups[src_group]['players'].pop(src_idx)
+            groups[target_gi]['players'].append(player_data)
+
+            src_size = len(groups[src_group]['players'])
+            dst_size = len(groups[target_gi]['players'])
+
+            # Rebuild tee sheet text
+            total_players = sum(len(g.get('players', [])) for g in groups)
+            lines = [f"🏌️ *{self.config.GROUP_NAME.upper()} TEE SHEET (UPDATED)* 🏌️\n"]
+            lines.append(f"📅 {datetime.now().strftime('%d/%m/%Y')}\n")
+            lines.append(f"👥 {total_players} players, {len(groups)} groups\n")
+            lines.append(f"➡️ Moved: {player_name} → Group {target_group}\n")
+
+            for i, group in enumerate(groups):
+                tee_time = group.get('tee_time', 'TBC')
+                lines.append(f"\n⏰ *Group {i + 1} - {tee_time}*")
+                for player in group.get('players', []):
+                    if player.get('is_guest'):
+                        lines.append(f"  • {player['name']} (guest of {player.get('brought_by', '?')})")
+                    else:
+                        lines.append(f"  • {player['name']}")
+
+            tee_sheet_text = '\n'.join(lines)
+            assigned_times = {i: g.get('tee_time', 'TBC') for i, g in enumerate(groups)}
+            self.db.save_published_tee_sheet(groups, assigned_times, tee_sheet_text)
+            self.send_to_admin_group(tee_sheet_text)
+            print(f"   ✅ Moved {player_name} to group {target_group} (group {src_group+1}: {src_size} players, group {target_group}: {dst_size} players)")
+
+        elif command == 'randomize':
+            # Randomize the tee sheet (full fresh generation)
+            participants = self.db.get_participants()
+            if not participants:
+                self.send_to_admin_group("❌ No participants to generate tee sheet for")
+                return
+            partner_prefs = self.db.get_partner_preferences()
+            avoidances = self.db.get_avoidances()
+            available_times = self.db.generate_tee_times()
+            tee_sheet, groups, assigned_times = self.tee_generator.generate(
+                participants, partner_prefs, avoidances, available_times
+            )
+            # Save as the new published sheet
+            self.db.save_published_tee_sheet(groups, assigned_times, tee_sheet)
+            self.send_to_admin_group(f"🔀 *RANDOMIZED TEE SHEET*\n\n{tee_sheet}")
+            print(f"   ✅ Randomized and published new tee sheet")
+
         elif command == 'unknown':
             # Unknown command - just log it, don't respond
             print(f"   ⚠️  Not a recognized command, ignoring")
@@ -2006,11 +2429,11 @@ class SwindleBot:
         participants = self.db.get_participants()
 
         if not participants:
-            return '📋 *Sunday Swindle Update*\n\nNo participants yet.'
+            return f'🏌️ *Shanks Update*\n\nNo names in yet - it\'s looking quiet out there!'
 
         total = sum(1 + len(p.get('guests', [])) for p in participants)
 
-        lines = ['📋 *Sunday Swindle Update*\n']
+        lines = [f'🏌️ *Shanks Update*\n']
         lines.append(f'👥 {len(participants)} signed up ({total} total with guests)\n')
 
         for p in participants:
@@ -2023,6 +2446,8 @@ class SwindleBot:
             pref_text = f" - {p['preferences']}" if p.get('preferences') else ""
             lines.append(f"• {p['name']}{guest_text}{pref_text}")
 
+        lines.append(f"\nIf you're playing and not on the list, give us a shout!")
+
         return '\n'.join(lines)
 
     def clear_weekly_data(self):
@@ -2031,30 +2456,43 @@ class SwindleBot:
         self.db.clear_participants()
         self.db.clear_time_preferences()
         self.db.clear_manual_tee_times()
+        self.db.clear_published_tee_sheet()
+        self.db.clear_weekly_pairings()
         print("✅ Weekly reset complete:")
         print("   - Participants cleared")
         print("   - Time preferences cleared (early/late)")
         print("   - Manual tee time modifications cleared")
+        print("   - Published tee sheet cleared")
+        print("   - MP/weekly pairings cleared")
         print("   - Partner preferences kept (season-long)")
         print("   - Tee time settings kept (season-long)")
 
         # Send notification to admin group
-        message = "🔄 WEEKLY RESET\n\nNew week started!\n\n✅ Cleared:\n- Participants\n- Time preferences\n- Tee time modifications\n\n🔒 Kept:\n- Partner preferences\n- Tee time settings"
+        message = "🏌️ *Shanks - New Week!*\n\nSlate wiped clean, ready for a fresh one.\n\n✅ *Cleared:*\n- Participants\n- Time preferences\n- Tee time modifications\n- Published tee sheet\n- MP pairings\n\n🔒 *Kept:*\n- Partner preferences\n- Tee time settings"
+        self.send_to_admin_group(message)
+
+    def send_weekly_opening(self):
+        """Send Monday morning message - ready to take tee times for Sunday"""
+        print("⏰ Sending weekly opening message...")
+        sunday = datetime.now() + timedelta(days=6)
+        message = (
+            f"🏌️ *Shanks here!* Now taking names for Sunday {sunday.strftime('%d/%m/%Y')}. Drop your name in the group if you're playing!\n\n"
+            f"Quick one - please make sure your WhatsApp display name is your *full name* so I can find you!\n"
+            f"_Settings > tap your name > edit_"
+        )
         self.send_to_admin_group(message)
 
     def send_health_check(self):
-        """Send health check"""
+        """Send health check to admin group"""
         print("⏰ Sending health check...")
         now = datetime.now()
-        message = f"HEALTH CHECK\n\nBot is running normally\nTime: {now.strftime('%d/%m/%Y %H:%M')}"
-        self.send_to_me(message)
+        message = f"🏌️ *Shanks* is alive and well! Still on the job.\n_{now.strftime('%d/%m/%Y %H:%M')}_"
+        self.send_to_admin_group(message)
 
     def send_startup_message(self):
-        """Send startup message"""
+        """Send startup message to admin group"""
         print("📤 Sending startup message...")
         now = datetime.now()
-        message = f"BOT STARTED\n\nGolf Swindle Bot v5 (AI-Native + Admin) is online\nStarted: {now.strftime('%d/%m/%Y %H:%M')}\nMonitoring: {self.config.GROUP_NAME}\nAdmin Group: {self.config.ADMIN_GROUP_NAME}"
-        self.send_to_me(message)
 
         # Also notify admin group
         commands = [
@@ -2065,31 +2503,77 @@ class SwindleBot:
             "Add [Name]",
             "Remove [Name]",
             "[Name] plays with [Name]",
+            "Remove [Name]'s preference",
+            "Don't pair [Name] with [Name]",
             "[Name] prefers early/late",
+            "Swap [Name] with [Name]",
+            "Move [Name] to group [N]",
             "Set tee times from [HH:MM]",
             "Add tee time [HH:MM]",
             "Remove tee time [HH:MM]",
             "Clear tee times",
-            "Clear time preferences"
+            "Clear time preferences",
+            "Randomize"
         ]
-        admin_msg = f"Admin Interface Ready (Phase 4.5)\n\nBot started at {now.strftime('%H:%M')}\n\nCommands:\n" + "\n".join(f"- {cmd}" for cmd in commands)
+        admin_msg = f"🏌️ *Shanks is online!* Ready to go at {now.strftime('%H:%M')}.\n\n*Commands:*\n" + "\n".join(f"  - {cmd}" for cmd in commands)
         self.send_to_admin_group(admin_msg)
 
+    def refresh_main_group(self):
+        """Fetch and analyze latest messages from the main group to ensure DB is up to date"""
+        print(f"🔄 Refreshing main group before scheduled message...")
+        try:
+            messages = self.whatsapp.get_all_messages(self.config.GROUP_NAME)
+            if messages is None:
+                print("⚠️  Failed to get main group messages - using existing data")
+                return
+
+            # Check if messages have changed since last analysis
+            last_snapshot = self.db.get_last_snapshot()
+            if last_snapshot and json.dumps(messages) == json.dumps(last_snapshot):
+                print("📋 No new messages since last check - already up to date")
+                return
+
+            # Analyze with AI
+            print(f"🤖 Analyzing {len(messages)} messages with AI...")
+            result = self.ai.analyze_messages(messages)
+
+            if result['players'] or result.get('total_count', 0) > 0:
+                self.db.update_participants(result['players'])
+                self.db.save_snapshot(messages)
+                if result.get('pairings'):
+                    self.db.save_weekly_pairings(result['pairings'])
+                print(f"✅ Refreshed: {result['total_count']} players")
+            else:
+                existing = self.db.get_participants()
+                if existing:
+                    print(f"⚠️  AI returned 0 players but DB has {len(existing)} - keeping existing data")
+                else:
+                    self.db.save_snapshot(messages)
+        except Exception as e:
+            print(f"⚠️  Error refreshing main group: {e} - using existing data")
+
     def send_daily_update(self):
-        """Send daily 8pm update"""
+        """Send daily 8pm update to admin group"""
         print("⏰ Sending daily update...")
+        self.refresh_main_group()
         participant_list = self.generate_participant_list()
-        self.send_to_me(participant_list)
+        self.send_to_admin_group(participant_list)
 
     def generate_saturday_tee_sheet(self):
-        """Generate Saturday 5pm tee sheet"""
+        """Generate Saturday 5pm tee sheet and publish it (locks in groups/times)"""
         print("⏰ Generating Saturday tee sheet...")
+        self.refresh_main_group()
         participants = self.db.get_participants()
         partner_prefs = self.db.get_partner_preferences()
         avoidances = self.db.get_avoidances()
         available_times = self.db.generate_tee_times()
-        tee_sheet, groups, _ = self.tee_generator.generate(participants, partner_prefs, avoidances, available_times)
-        self.send_to_me(f"🔄 *FINAL TEE SHEET*\n\n{tee_sheet}")
+        tee_sheet, groups, assigned_times = self.tee_generator.generate(
+            participants, partner_prefs, avoidances, available_times
+        )
+        # Save as published sheet - future changes will only minimally adjust
+        self.db.save_published_tee_sheet(groups, assigned_times, tee_sheet)
+        self.send_to_admin_group(f"🏌️ *Shanks has the final tee sheet!*\n\nThis is now locked in. Any changes from here will only tweak the affected groups.\n\n{tee_sheet}")
+        print("✅ Tee sheet published - future changes will use minimal adjustments")
 
     def schedule_jobs(self):
         """Schedule recurring jobs"""
@@ -2101,6 +2585,7 @@ class SwindleBot:
         schedule.every().friday.at("20:00").do(self.send_daily_update)
         schedule.every().saturday.at("17:00").do(self.generate_saturday_tee_sheet)
         schedule.every().monday.at("00:01").do(self.clear_weekly_data)
+        schedule.every().monday.at("10:00").do(self.send_weekly_opening)
         print("✅ Scheduled jobs configured")
 
     def run_scheduler(self):
@@ -2111,14 +2596,30 @@ class SwindleBot:
 
     def monitor_messages(self):
         """Monitor and analyze messages with AI"""
+        main_interval = self.config.MAIN_GROUP_CHECK_MINUTES * 60  # Convert to seconds
+        admin_interval = self.config.ADMIN_GROUP_CHECK_SECONDS
+        burst_duration = self.config.ADMIN_BURST_DURATION_SECONDS
+        burst_interval = self.config.ADMIN_BURST_CHECK_SECONDS
+
         print(f"\n👀 Monitoring groups:")
-        print(f"   📊 Main: {self.config.GROUP_NAME} (every 1 hour)")
-        print(f"   ⚙️  Admin: {self.config.ADMIN_GROUP_NAME} (every 1 minute)")
+        print(f"   📊 Main: {self.config.GROUP_NAME} (every {self.config.MAIN_GROUP_CHECK_MINUTES} min)")
+        print(f"   ⚙️  Admin: {self.config.ADMIN_GROUP_NAME} (every {admin_interval}s, burst: {burst_interval}s for {burst_duration}s)")
         print(f"🤖 AI-powered analysis enabled")
 
         consecutive_failures = 0
         max_consecutive_failures = 3
-        last_main_check = time.time() - 3600  # Start by checking immediately
+        last_main_check = time.time() - main_interval  # Start by checking immediately
+        burst_mode_until = 0  # Timestamp when burst mode expires
+
+        # Initialize last_admin_check to the latest message so we don't re-process old messages
+        try:
+            admin_messages = self.whatsapp.get_all_messages(self.config.ADMIN_GROUP_NAME)
+            if admin_messages and len(admin_messages) > 0:
+                last_msg = admin_messages[-1]
+                self.last_admin_check = f"{last_msg['sender']}:{last_msg['text']}"
+                print(f"📌 Initialized admin check - skipping {len(admin_messages)} existing messages")
+        except Exception as e:
+            print(f"⚠️  Could not initialize admin check: {e}")
 
         while self.running:
             try:
@@ -2141,9 +2642,9 @@ class SwindleBot:
                 if now.weekday() == 0 and now.hour == 0:
                     self.clear_weekly_data()
 
-                # === MONITOR MAIN GROUP (every hour) ===
+                # === MONITOR MAIN GROUP ===
                 time_since_last_check = current_time - last_main_check
-                if time_since_last_check >= 3600:  # 1 hour
+                if time_since_last_check >= main_interval:
                     # Check if we should monitor main group (not after Sunday tee time)
                     should_monitor_main = True
                     if now.weekday() == 6:
@@ -2164,13 +2665,31 @@ class SwindleBot:
                         else:
                             consecutive_failures = 0
 
+                            # Check if messages have changed since last analysis
+                            last_snapshot = self.db.get_last_snapshot()
+                            if last_snapshot and json.dumps(messages) == json.dumps(last_snapshot):
+                                print(f"📋 No new messages since last check - skipping AI analysis (saving tokens)")
+                                last_main_check = current_time
+                                continue
+
                             # Analyze with AI
                             print(f"🤖 Analyzing {len(messages)} messages with AI...")
                             result = self.ai.analyze_messages(messages)
 
-                            # Update database
-                            self.db.update_participants(result['players'])
-                            self.db.save_snapshot(messages)
+                            # Only update database if AI returned valid results
+                            # Prevents wiping participants on API errors
+                            if result['players'] or result.get('total_count', 0) > 0:
+                                self.db.update_participants(result['players'])
+                                self.db.save_snapshot(messages)
+                                # Save any AI-detected MP pairings as weekly constraints
+                                if result.get('pairings'):
+                                    self.db.save_weekly_pairings(result['pairings'])
+                            else:
+                                existing = self.db.get_participants()
+                                if existing:
+                                    print(f"⚠️  AI returned 0 players but DB has {len(existing)} - keeping existing data")
+                                else:
+                                    self.db.save_snapshot(messages)
 
                             # Log results
                             print(f"✅ Analysis complete:")
@@ -2188,58 +2707,56 @@ class SwindleBot:
 
                     last_main_check = current_time
 
-                # === MONITOR ADMIN GROUP (every minute) ===
-                print(f"\n📥 Checking admin group for commands...")
+                # === MONITOR ADMIN GROUP ===
+                in_burst = current_time < burst_mode_until
+                if in_burst:
+                    remaining = int(burst_mode_until - current_time)
+                    print(f"\n📥 Checking admin group (burst mode - {remaining}s remaining)...")
+                else:
+                    print(f"\n📥 Checking admin group for commands...")
+
                 admin_messages = self.whatsapp.get_all_messages(self.config.ADMIN_GROUP_NAME)
 
                 if admin_messages and len(admin_messages) > 0:
-                    # Only check the LAST message (most recent)
-                    last_msg = admin_messages[-1]
-                    sender = last_msg['sender']
-                    text = last_msg['text']
+                    # Find ALL new messages since last check (not just the latest)
+                    new_messages = []
+                    for i in range(len(admin_messages) - 1, -1, -1):
+                        msg = admin_messages[i]
+                        msg_key = f"{msg['sender']}:{msg['text']}"
+                        if msg_key == self.last_admin_check:
+                            break
+                        new_messages.append(msg)
+                    new_messages.reverse()  # Process in chronological order
 
-                    # Create unique key for this message
-                    msg_key = f"{sender}:{text}"
-
-                    # Skip if we already processed this message
-                    if msg_key == self.last_admin_check:
-                        print(f"   No new messages (last was: {text[:30]}...)")
+                    if not new_messages:
+                        last_text = admin_messages[-1]['text']
+                        print(f"   No new messages (last was: {last_text[:30]}...)")
                     else:
-                        # Check if sender is an admin (by name or phone)
-                        sender_cleaned = sender.replace('+', '').replace(' ', '').replace('(', '').replace(')', '')
-                        is_admin = sender in self.config.ADMIN_USERS or sender_cleaned in self.config.ADMIN_USERS
+                        print(f"   Found {len(new_messages)} new message(s)")
+                        for msg in new_messages:
+                            sender = msg['sender']
+                            text = msg['text']
+                            msg_key = f"{sender}:{text}"
+                            self.last_admin_check = msg_key
 
-                        # Ignore bot's own messages (startup messages, responses)
-                        bot_message_patterns = [
-                            "Admin Interface Ready",
-                            "Bot started at",
-                            "Sunday Swindle Update",
-                            "TEE SHEET",
-                            "Tee Time Settings",
-                            "Tee times configured",
-                            "✅ Added",
-                            "✅ Removed",
-                            "✅ Partner preference",
-                            "✅ Avoidance set",
-                            "✅ Time preference",
-                            "🤝 Constraints",
-                            "No participants yet",
-                            "📋 Current participants",
-                            "⏰ Start:",
-                            "Interval:",
-                        ]
-                        is_bot_message = any(pattern in text for pattern in bot_message_patterns)
+                            # Skip bot responses using blocklist
+                            if self._is_bot_response(text):
+                                print(f"   Skipping bot response: '{text[:40]}...'")
+                                continue
 
-                        if is_bot_message:
-                            print(f"   Skipping bot's own message")
-                            self.last_admin_check = msg_key
-                        elif is_admin:
-                            print(f"✅ New admin message from: {sender}")
-                            self.handle_admin_command(text, sender)
-                            self.last_admin_check = msg_key
-                        else:
-                            print(f"⚠️  Message from non-admin: {sender}")
-                            self.last_admin_check = msg_key
+                            # Check if sender is an admin
+                            sender_cleaned = sender.replace('+', '').replace(' ', '').replace('(', '').replace(')', '')
+                            is_admin = sender in self.config.ADMIN_USERS or sender_cleaned in self.config.ADMIN_USERS
+
+                            if is_admin:
+                                print(f"✅ New admin message from: {sender}")
+                                print(f"📱 Processing: '{text[:50]}...'")
+                                self.handle_admin_command(text, sender)
+                                # Activate burst mode
+                                burst_mode_until = time.time() + burst_duration
+                                print(f"⚡ Burst mode activated - checking every {burst_interval}s for {burst_duration}s")
+                            else:
+                                print(f"⚠️  Message from non-admin: {sender}")
 
                 # Check for failures
                 if consecutive_failures >= max_consecutive_failures:
@@ -2247,10 +2764,15 @@ class SwindleBot:
                     self.running = False
                     break
 
-                # Calculate next main check time
-                minutes_until_next_main = int((3600 - (current_time - last_main_check)) / 60)
-                print(f"⏰ Next admin check in 1 minute (main group in {minutes_until_next_main} min)...")
-                time.sleep(60)
+                # Sleep - use burst interval if admin is active, otherwise normal interval
+                in_burst = time.time() < burst_mode_until
+                sleep_time = burst_interval if in_burst else admin_interval
+                minutes_until_next_main = int((main_interval - (time.time() - last_main_check)) / 60)
+                if in_burst:
+                    print(f"⏰ Next admin check in {sleep_time}s (burst) | main group in {minutes_until_next_main} min...")
+                else:
+                    print(f"⏰ Next admin check in {sleep_time}s | main group in {minutes_until_next_main} min...")
+                time.sleep(sleep_time)
 
             except KeyboardInterrupt:
                 print("\n\n👋 Shutting down...")

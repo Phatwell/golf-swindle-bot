@@ -25,14 +25,21 @@ An intelligent WhatsApp bot that automates weekly golf tee sheet management. The
 - Configurable start times and intervals
 - Preference-based assignment (early birds vs late starters)
 - Calculates unused slots to return to the course
-- Actual tee times in tee sheet (e.g., 8:00am, 8:08am, 8:16am)
+- Actual tee times in tee sheet (e.g., 8:24am, 8:32am, 8:40am)
 - **Weekly time preferences**: Reset each week (partner preferences persist)
+
+### 🔒 Tee Sheet Stability
+- **Published tee sheet**: Saturday 5pm sheet is locked in as the official version
+- **Minimal adjustments**: If someone drops out after publishing, only that person is removed - everyone else stays put
+- **Randomize on demand**: Admins can force a full reshuffle when needed
+- **No surprises**: Players won't get moved to a different tee time without realising
 
 ### 📱 Admin Control via WhatsApp
 - Fast 1-minute response time for admin commands
 - Add/remove players and guests manually
 - Set partner preferences and avoidances
 - Configure tee times
+- Randomize tee sheet on demand
 - View constraints and settings
 
 ---
@@ -94,7 +101,11 @@ An intelligent WhatsApp bot that automates weekly golf tee sheet management. The
 
 7. **Run the bot**
    ```bash
+   # Run in foreground
    python3 src/swindle_bot_v5_admin.py
+
+   # Or run in background (survives terminal close)
+   ./start_bot.sh
    ```
 
 8. **First run setup:**
@@ -165,6 +176,11 @@ Clear tee times              # Reset to pure auto-generation
 Clear time preferences       # Clear early/late for new week (keeps partner prefs)
 ```
 
+**Tee sheet management:**
+```
+Randomize                    # Full reshuffle of the tee sheet (respects constraints)
+```
+
 **Remove preferences:**
 ```
 Remove Mike's partner preference
@@ -182,6 +198,10 @@ golf-swindle-bot/
 ├── .gitignore                   # Git ignore rules
 ├── .env.example                 # Example environment variables
 ├── config.example.py            # Example configuration
+│
+├── start_bot.sh                 # Start bot in background
+├── stop_bot.sh                  # Stop running bot
+├── status_bot.sh                # Check bot status
 │
 ├── src/
 │   └── swindle_bot_v5_admin.py # Main bot application
@@ -233,17 +253,18 @@ If some contacts have unusual display names in WhatsApp:
 ```python
 NAME_MAPPING = {
     ".": "John",   # Contact name is literally "."
-    "L": "Lloyd",  # Contact name is just "L"
+    "L": "Dave",   # Contact name is just "L"
 }
 ```
 
 ### Database
 
 - SQLite database stored in `data/` directory
-- Tables: `participants`, `constraints`, `tee_time_settings`, `manual_tee_times`, `removed_tee_times`, `last_snapshot`
+- Tables: `participants`, `constraints`, `tee_time_settings`, `manual_tee_times`, `removed_tee_times`, `last_snapshot`, `published_tee_sheet`
 - Automatically created on first run
 - Backs up Chrome profile every session
 - **Additive tee times**: Combines auto-generated times with manual additions/removals
+- **Published tee sheet**: Stored after Saturday 5pm for stability
 
 ---
 
@@ -371,24 +392,33 @@ git check-ignore config.py .env     # Should show both files
 - Unused slot tracking
 - Admin commands for configuration
 
+### ✅ Phase 5: Tee Sheet Stability & AI Upgrade
+- **Claude Opus** for accurate, consistent AI analysis
+- Published tee sheet system (locked in after Saturday 5pm)
+- Minimal adjustment on player changes (no full reshuffle)
+- Randomize command for admin-triggered reshuffles
+- Token optimization (skip unchanged messages, trimmed prompts)
+- Bug fixes (AI error protection, time preference saving)
+
 ---
 
 ## 📅 Preference Types: Season-Long vs Weekly
 
 ### Season-Long (Persist Forever)
 These are set once and automatically applied every week:
-- ✅ **Partner preferences**: "Lloyd plays with Segan"
+- ✅ **Partner preferences**: "Mike plays with John"
 - ✅ **Avoidances**: "Don't pair Mike with John"
 - ✅ **Tee time settings**: Auto-generation configuration
 
-### Weekly (Reset Each Week)
-These must be set fresh each week:
+### Weekly (Reset Each Monday 00:01)
+These are automatically cleared each week:
 - 🔄 **Time preferences**: "Mike prefers early"
 - 🔄 **Tee time modifications**: Added/removed specific times
+- 🔄 **Published tee sheet**: Previous week's locked-in sheet
 
 **Why?** Players' time preferences change week-to-week, but playing partnerships are consistent all season!
 
-**Admin commands:**
+**Manual reset commands (if needed mid-week):**
 ```
 Clear time preferences    # Reset early/late for new week
 Clear tee times          # Reset tee time modifications
@@ -425,7 +455,7 @@ This project is open source and available under the MIT License.
 
 ## 🙏 Acknowledgments
 
-- **Anthropic Claude AI** - Powers the intelligent message analysis
+- **Anthropic Claude Sonnet** - Powers the intelligent message analysis
 - **Selenium WebDriver** - Enables WhatsApp Web automation
 - **Python Schedule** - Handles automated tasks
 
@@ -444,4 +474,4 @@ This project is open source and available under the MIT License.
 ---
 
 **Last Updated**: February 2026
-**Version**: 5.0 (All 4 Phases Complete)
+**Version**: 5.1 (Phase 5 - Tee Sheet Stability & AI Upgrade)
