@@ -1177,7 +1177,14 @@ class WhatsAppBot:
             group_span = group_spans[0]
             parent = group_span.find_element(By.XPATH, './ancestor::div[5]')
             parent.click()
-            time.sleep(3)
+            time.sleep(5)
+
+            # Wait for messages to fully load in the DOM before scraping
+            for _ in range(10):
+                msg_count = len(self.driver.find_elements(By.CSS_SELECTOR, '.message-in, .message-out'))
+                if msg_count >= 20:
+                    break
+                time.sleep(1)
 
             # Get ALL messages - both incoming and outgoing
             messages = []
@@ -1719,7 +1726,7 @@ class SwindleBot:
         self.whatsapp = WhatsAppBot(self.config)
         self.tee_generator = TeeSheetGenerator(self.config)
         self.running = True
-        self.last_admin_check = None  # Track last admin message processed
+        self._admin_anchor = []  # Last 3 admin messages as fingerprint for new message detection
 
         # Blocklist of known bot response prefixes (after emoji/markdown stripping)
         # These are how bot responses look when WhatsApp strips formatting
@@ -1818,14 +1825,12 @@ class SwindleBot:
         print(f"   → Detected: {command} (confidence: {confidence})")
 
         if command == 'show_list':
-            # Refresh from main group first so the list is up to date
             self.refresh_main_group()
             participant_list = self.generate_participant_list()
             self.send_to_admin_group(participant_list)
             print(f"   ✅ Sent participant list")
 
         elif command == 'show_tee_sheet':
-            # Refresh from main group first so the sheet is up to date
             self.refresh_main_group()
             participants = self.db.get_participants()
             published = self.db.get_published_tee_sheet()
@@ -2518,18 +2523,58 @@ class SwindleBot:
         admin_msg = f"🏌️ *Shanks is online!* Ready to go at {now.strftime('%H:%M')}.\n\n*Commands:*\n" + "\n".join(f"  - {cmd}" for cmd in commands)
         self.send_to_admin_group(admin_msg)
 
+    def _find_new_admin_messages(self, current_messages: list) -> list:
+        """Find new admin messages by matching the anchor sequence (last 3 messages from previous check).
+        Uses a sequence of messages as fingerprint so duplicate commands are handled correctly."""
+        if not self._admin_anchor:
+            return []  # First run after init, nothing is new
+
+        anchor_len = len(self._admin_anchor)
+
+        # Search backwards through current messages to find where the anchor sequence appears
+        for i in range(len(current_messages) - anchor_len, -1, -1):
+            window = [(m['sender'], m['text']) for m in current_messages[i:i + anchor_len]]
+            if window == self._admin_anchor:
+                # Found the anchor - everything after it is new
+                return current_messages[i + anchor_len:]
+
+        # Anchor not found (messages shifted too much) - skip this cycle to be safe
+        print(f"   ⚠️  Admin anchor not found in {len(current_messages)} messages - resetting")
+        return []
+
+    def _snapshot_matches(self, messages, last_snapshot) -> bool:
+        """Compare messages to snapshot, ignoring order (DOM order can vary between loads)"""
+        if not last_snapshot:
+            return False
+        sorted_new = sorted(messages, key=lambda m: (m.get('sender', ''), m.get('text', '')))
+        sorted_old = sorted(last_snapshot, key=lambda m: (m.get('sender', ''), m.get('text', '')))
+        return json.dumps(sorted_new) == json.dumps(sorted_old)
+
     def refresh_main_group(self):
-        """Fetch and analyze latest messages from the main group to ensure DB is up to date"""
+        """Reload WhatsApp Web and do a fresh scan of the main group.
+        This ensures a full message load (WhatsApp loads fewer messages on chat re-visits).
+        Only used before scheduled messages - on-demand commands use DB data."""
         print(f"🔄 Refreshing main group before scheduled message...")
         try:
+            # Reload page to reset WhatsApp's DOM - ensures full message load
+            print("   Reloading WhatsApp Web for clean message load...")
+            self.whatsapp.driver.get('https://web.whatsapp.com')
+            time.sleep(8)
+            # Wait for WhatsApp to be ready
+            self.whatsapp.wait.until(
+                EC.presence_of_element_located((By.XPATH, '//div[@contenteditable="true"][@data-tab="3"]'))
+            )
+            time.sleep(2)
+            print("   ✅ WhatsApp reloaded")
+
             messages = self.whatsapp.get_all_messages(self.config.GROUP_NAME)
             if messages is None:
                 print("⚠️  Failed to get main group messages - using existing data")
                 return
 
-            # Check if messages have changed since last analysis
+            # Check if messages have changed since last analysis (order-independent)
             last_snapshot = self.db.get_last_snapshot()
-            if last_snapshot and json.dumps(messages) == json.dumps(last_snapshot):
+            if self._snapshot_matches(messages, last_snapshot):
                 print("📋 No new messages since last check - already up to date")
                 return
 
@@ -2538,11 +2583,18 @@ class SwindleBot:
             result = self.ai.analyze_messages(messages)
 
             if result['players'] or result.get('total_count', 0) > 0:
-                self.db.update_participants(result['players'])
-                self.db.save_snapshot(messages)
-                if result.get('pairings'):
-                    self.db.save_weekly_pairings(result['pairings'])
-                print(f"✅ Refreshed: {result['total_count']} players")
+                # Safety check: don't overwrite a larger list with a significantly smaller one
+                existing = self.db.get_participants()
+                new_count = len(result['players'])
+                existing_count = len(existing) if existing else 0
+                if existing_count > 0 and new_count < existing_count * 0.7:
+                    print(f"⚠️  AI returned {new_count} players but DB has {existing_count} - keeping existing data (possible scrape issue)")
+                else:
+                    self.db.update_participants(result['players'])
+                    self.db.save_snapshot(messages)
+                    if result.get('pairings'):
+                        self.db.save_weekly_pairings(result['pairings'])
+                    print(f"✅ Refreshed: {result['total_count']} players")
             else:
                 existing = self.db.get_participants()
                 if existing:
@@ -2578,11 +2630,17 @@ class SwindleBot:
     def schedule_jobs(self):
         """Schedule recurring jobs"""
         schedule.every().day.at("12:00").do(self.send_health_check)
+        schedule.every().monday.at("10:00").do(self.send_daily_update)
         schedule.every().monday.at("20:00").do(self.send_daily_update)
+        schedule.every().tuesday.at("10:00").do(self.send_daily_update)
         schedule.every().tuesday.at("20:00").do(self.send_daily_update)
+        schedule.every().wednesday.at("10:00").do(self.send_daily_update)
         schedule.every().wednesday.at("20:00").do(self.send_daily_update)
+        schedule.every().thursday.at("10:00").do(self.send_daily_update)
         schedule.every().thursday.at("20:00").do(self.send_daily_update)
+        schedule.every().friday.at("10:00").do(self.send_daily_update)
         schedule.every().friday.at("20:00").do(self.send_daily_update)
+        schedule.every().saturday.at("10:00").do(self.send_daily_update)
         schedule.every().saturday.at("17:00").do(self.generate_saturday_tee_sheet)
         schedule.every().monday.at("00:01").do(self.clear_weekly_data)
         schedule.every().monday.at("10:00").do(self.send_weekly_opening)
@@ -2609,16 +2667,23 @@ class SwindleBot:
         consecutive_failures = 0
         max_consecutive_failures = 3
         last_main_check = time.time() - main_interval  # Start by checking immediately
+
+        # Clear snapshot so first main group check always does a fresh analysis
+        self.db.save_snapshot([])
+        print("🔄 Cleared message snapshot - will do fresh analysis on first check")
         burst_mode_until = 0  # Timestamp when burst mode expires
 
-        # Initialize last_admin_check to the latest message so we don't re-process old messages
+        # Initialize admin anchor - save last 3 messages as fingerprint to detect new ones
         try:
             admin_messages = self.whatsapp.get_all_messages(self.config.ADMIN_GROUP_NAME)
-            if admin_messages and len(admin_messages) > 0:
-                last_msg = admin_messages[-1]
-                self.last_admin_check = f"{last_msg['sender']}:{last_msg['text']}"
+            if admin_messages:
+                self._admin_anchor = [(m['sender'], m['text']) for m in admin_messages[-3:]]
                 print(f"📌 Initialized admin check - skipping {len(admin_messages)} existing messages")
+            else:
+                self._admin_anchor = []
+                print(f"📌 Initialized admin check - no existing messages")
         except Exception as e:
+            self._admin_anchor = []
             print(f"⚠️  Could not initialize admin check: {e}")
 
         while self.running:
@@ -2665,9 +2730,9 @@ class SwindleBot:
                         else:
                             consecutive_failures = 0
 
-                            # Check if messages have changed since last analysis
+                            # Check if messages have changed since last analysis (order-independent)
                             last_snapshot = self.db.get_last_snapshot()
-                            if last_snapshot and json.dumps(messages) == json.dumps(last_snapshot):
+                            if self._snapshot_matches(messages, last_snapshot):
                                 print(f"📋 No new messages since last check - skipping AI analysis (saving tokens)")
                                 last_main_check = current_time
                                 continue
@@ -2679,11 +2744,18 @@ class SwindleBot:
                             # Only update database if AI returned valid results
                             # Prevents wiping participants on API errors
                             if result['players'] or result.get('total_count', 0) > 0:
-                                self.db.update_participants(result['players'])
-                                self.db.save_snapshot(messages)
-                                # Save any AI-detected MP pairings as weekly constraints
-                                if result.get('pairings'):
-                                    self.db.save_weekly_pairings(result['pairings'])
+                                # Safety check: don't overwrite a larger list with a significantly smaller one
+                                existing = self.db.get_participants()
+                                new_count = len(result['players'])
+                                existing_count = len(existing) if existing else 0
+                                if existing_count > 0 and new_count < existing_count * 0.7:
+                                    print(f"⚠️  AI returned {new_count} players but DB has {existing_count} - keeping existing data (possible scrape issue)")
+                                else:
+                                    self.db.update_participants(result['players'])
+                                    self.db.save_snapshot(messages)
+                                    # Save any AI-detected MP pairings as weekly constraints
+                                    if result.get('pairings'):
+                                        self.db.save_weekly_pairings(result['pairings'])
                             else:
                                 existing = self.db.get_participants()
                                 if existing:
@@ -2718,26 +2790,18 @@ class SwindleBot:
                 admin_messages = self.whatsapp.get_all_messages(self.config.ADMIN_GROUP_NAME)
 
                 if admin_messages and len(admin_messages) > 0:
-                    # Find ALL new messages since last check (not just the latest)
-                    new_messages = []
-                    for i in range(len(admin_messages) - 1, -1, -1):
-                        msg = admin_messages[i]
-                        msg_key = f"{msg['sender']}:{msg['text']}"
-                        if msg_key == self.last_admin_check:
-                            break
-                        new_messages.append(msg)
-                    new_messages.reverse()  # Process in chronological order
+                    # Find new messages using anchor sequence (last 3 messages as fingerprint)
+                    new_messages = self._find_new_admin_messages(admin_messages)
 
                     if not new_messages:
                         last_text = admin_messages[-1]['text']
                         print(f"   No new messages (last was: {last_text[:30]}...)")
                     else:
                         print(f"   Found {len(new_messages)} new message(s)")
+
                         for msg in new_messages:
                             sender = msg['sender']
                             text = msg['text']
-                            msg_key = f"{sender}:{text}"
-                            self.last_admin_check = msg_key
 
                             # Skip bot responses using blocklist
                             if self._is_bot_response(text):
@@ -2750,13 +2814,15 @@ class SwindleBot:
 
                             if is_admin:
                                 print(f"✅ New admin message from: {sender}")
-                                print(f"📱 Processing: '{text[:50]}...'")
                                 self.handle_admin_command(text, sender)
                                 # Activate burst mode
                                 burst_mode_until = time.time() + burst_duration
                                 print(f"⚡ Burst mode activated - checking every {burst_interval}s for {burst_duration}s")
                             else:
                                 print(f"⚠️  Message from non-admin: {sender}")
+
+                    # Always update the anchor to the latest 3 messages
+                    self._admin_anchor = [(m['sender'], m['text']) for m in admin_messages[-3:]]
 
                 # Check for failures
                 if consecutive_failures >= max_consecutive_failures:
