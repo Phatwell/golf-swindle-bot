@@ -81,7 +81,7 @@ class Config:
         DEFAULT_INTERVAL_MINUTES = 8
         DEFAULT_NUM_SLOTS = 10
         MAX_MESSAGES = 200
-        MAIN_GROUP_CHECK_MINUTES = 180
+        MAIN_GROUP_CHECK_MINUTES = 10
         ADMIN_GROUP_CHECK_SECONDS = 60
         ADMIN_BURST_DURATION_SECONDS = 180
         ADMIN_BURST_CHECK_SECONDS = 5
@@ -113,6 +113,7 @@ class Database:
                 preferences TEXT,
                 signup_order INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'playing',
+                manually_added INTEGER NOT NULL DEFAULT 0,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -127,6 +128,13 @@ class Database:
             for idx, (name,) in enumerate(rows, 1):
                 cursor.execute("UPDATE participants SET signup_order = ? WHERE name = ?", (idx, name))
             print("   Migrated participants table: added signup_order and status columns")
+
+        # Migrate: add manually_added column if missing
+        try:
+            cursor.execute("SELECT manually_added FROM participants LIMIT 1")
+        except sqlite3.OperationalError:
+            cursor.execute("ALTER TABLE participants ADD COLUMN manually_added INTEGER NOT NULL DEFAULT 0")
+            print("   Migrated participants table: added manually_added column")
 
         # Tee sheet table
         cursor.execute("""
@@ -237,16 +245,23 @@ class Database:
 
     def update_participants(self, players: List[Dict]) -> Dict:
         """Replace participants with AI list, preserving signup_order for existing players.
+        Manually-added players (via admin commands) are preserved even if AI doesn't find them.
         New players get order based on their position in the AI list (= chat signup order).
         Returns {'promoted': [names], 'demoted': [names]} after status recalculation."""
         conn = self._connect()
         try:
             cursor = conn.cursor()
 
-            # Read existing signup orders before delete
-            cursor.execute("SELECT name, signup_order FROM participants")
-            existing_orders = {name: order for name, order in cursor.fetchall()}
+            # Read existing data before delete
+            cursor.execute("SELECT name, signup_order, manually_added, guests, preferences FROM participants")
+            existing_rows = cursor.fetchall()
+            existing_orders = {row[0]: row[1] for row in existing_rows}
+            manual_players = {row[0]: {'guests': row[3], 'preferences': row[4], 'order': row[1]}
+                            for row in existing_rows if row[2] == 1}
             max_order = max(existing_orders.values()) if existing_orders else 0
+
+            # Build set of AI-found player names
+            ai_names = {p['name'] for p in players}
 
             # Assign signup_order: existing players keep theirs, new players get next available
             ordered_players = []
@@ -257,16 +272,33 @@ class Database:
                 else:
                     max_order += 1
                     order = max_order
-                ordered_players.append((player, order))
+                # If AI found a manually-added player, merge any manual guests the AI missed
+                if name in manual_players:
+                    manual_guests = json.loads(manual_players[name]['guests']) if manual_players[name]['guests'] else []
+                    ai_guests = player.get('guests', [])
+                    for g in manual_guests:
+                        if g not in ai_guests:
+                            ai_guests.append(g)
+                    player['guests'] = ai_guests
+                ordered_players.append((player, order, 0))
+
+            # Preserve manually-added players that AI didn't find
+            for name, data in manual_players.items():
+                if name not in ai_names:
+                    guests_json = data['guests']
+                    prefs = data['preferences']
+                    ordered_players.append(
+                        ({'name': name, 'guests': json.loads(guests_json) if guests_json else [], 'preferences': prefs},
+                         data['order'], 1))
 
             # Replace all participants
             cursor.execute("DELETE FROM participants")
-            for player, order in ordered_players:
+            for player, order, manual in ordered_players:
                 guests_json = json.dumps(player.get('guests', []))
                 cursor.execute("""
-                    INSERT INTO participants (name, guests, preferences, signup_order, status, updated_at)
-                    VALUES (?, ?, ?, ?, 'playing', CURRENT_TIMESTAMP)
-                """, (player['name'], guests_json, player.get('preferences'), order))
+                    INSERT INTO participants (name, guests, preferences, signup_order, status, manually_added, updated_at)
+                    VALUES (?, ?, ?, ?, 'playing', ?, CURRENT_TIMESTAMP)
+                """, (player['name'], guests_json, player.get('preferences'), order, manual))
             conn.commit()
         finally:
             conn.close()
@@ -344,8 +376,8 @@ class Database:
 
             guests_json = json.dumps(guests or [])
             cursor.execute("""
-                INSERT INTO participants (name, guests, preferences, signup_order, status, updated_at)
-                VALUES (?, ?, ?, ?, 'playing', CURRENT_TIMESTAMP)
+                INSERT INTO participants (name, guests, preferences, signup_order, status, manually_added, updated_at)
+                VALUES (?, ?, ?, ?, 'playing', 1, CURRENT_TIMESTAMP)
             """, (name, guests_json, preferences, max_order + 1))
 
             conn.commit()
@@ -946,8 +978,10 @@ class AIAnalyzer:
         if organizer_idx >= 0:
             filtered_messages = messages[organizer_idx:]
         else:
-            # If no organizer message found, use all messages (fallback)
-            filtered_messages = messages
+            # "Taking names" message not visible - too many messages since then
+            # Run delta analysis on recent messages to catch new signups/dropouts
+            print(f"⚠️  'Taking names' message not found in {len(messages)} loaded messages - running delta analysis")
+            return self._analyze_delta(messages)
 
         # 3. Filter out messages that quote the organizer message WITHOUT adding signup text
         final_messages = []
@@ -997,13 +1031,14 @@ RULES:
 6. PLAYING: "I'm in", "yes please", "count me in", "please", "me", "yes"
 7. NOT PLAYING: "I'm out", "can't make it", illness mentions
 8. IGNORE: questions, banter, emoji reactions, organisational chat
-9. Quoted messages: text before sender's own words is a QUOTE - only use sender's own words.
-10. Guests: ONLY "+1" or "can I have a guest" → "[HostName]-Guest" (anonymous guest). "bringing [Name]" where [Name] is not a group member → named guest.
-11. SIGNING UP OTHERS: "me and X please" or "me X and Y please" = the sender PLUS X and Y as SEPARATE PLAYERS (not guests). They are independent players signed up by a friend. Use the names as written. If any of them later send their own message, they are confirmed as their own player.
-12. Note early/late preferences if mentioned.
-13. MP/Match Play pairings: When someone says "me and [Name] for MP" or similar, both are playing AND want to be paired together. Add to "pairings" array as [sender, named_player]. The named player may not be the exact sender name - use the name as written in the message.
-14. RECAP MESSAGES: The organizer may post a list of names as a recap. Use this to CONFIRM players but also check if the organizer included themselves in the list - if so, they are also playing.
-15. CRITICAL: Return players in the ORDER they first signed up (earliest message = first in list). This order determines who gets a playing spot vs goes on the reserves list."""
+9. QUOTED MESSAGES: When a message starts with another person's name/number/text before the sender's own words, that initial part is a QUOTE. Only the sender's OWN words (after the quote) count. Preferences mentioned in the sender's own words belong to THE SENDER, not the quoted person.
+10. Guests: ONLY "+1" or "can I have a guest" = "[HostName]-Guest" (anonymous guest). "bringing [Name]" where [Name] is not a group member = named guest.
+11. SIGNING UP OTHERS: "me and X please" or "me and X for MP" or "me X and Y please" = the sender PLUS X and Y as SEPARATE PLAYERS (not guests). Example: [Alex] says "Me and John balls for MP please" = TWO players: Alex AND John Balls. Example: [Maice] says "Me mitch and ken please" = THREE players: Maice, Mitch, Ken. They are independent players, NOT guests.
+12. NAME RESOLUTION: If someone is signed up by nickname (e.g. "ken") and later a matching person sends their own message (e.g. [KennyD]), use the [SenderName] as the canonical name. Similarly, use full names from recap messages when available (e.g. recap says "Mitchell Pettengell" for "mitch").
+13. Note early/late or specific tee time preferences if mentioned. Attribute preferences to the person who SAID them, not to a quoted person.
+14. MP/Match Play pairings: When someone says "me and [Name] for MP" or similar, both are playing AND want to be paired together. Add to "pairings" array as [sender, named_player].
+15. RECAP MESSAGES: The organizer may post a list of names as a recap/roll call. ALL names in this list are confirmed players. Anyone listed who hasn't sent their own message should still be added (e.g. "Scotty" in a recap = Scotty is playing). If the organizer listed themselves, they are also playing.
+16. CRITICAL: Return players in the ORDER they first signed up (earliest message = first in list). This order determines who gets a playing spot vs goes on the reserves list."""
 
         user_prompt = f"""MESSAGES:
 {messages_text}
@@ -1015,7 +1050,7 @@ Return ONLY valid JSON:
         try:
             response = self.client.messages.create(
                 model="claude-haiku-4-5-20251001",
-                max_tokens=1000,
+                max_tokens=4000,
                 temperature=0,
                 system=system_prompt,
                 messages=[{
@@ -1044,6 +1079,69 @@ Return ONLY valid JSON:
                 "summary": "Error analyzing messages",
                 "changes": []
             }
+
+    def _analyze_delta(self, messages: List[Dict]) -> Optional[Dict]:
+        """Analyze recent messages for new signups/dropouts when 'taking names' is not visible.
+        Returns a delta result with 'add' and 'remove' lists, or None if nothing found."""
+        messages_text = "\n".join([
+            f"[{msg['sender']}]: {msg['text']}"
+            for msg in messages
+        ])
+
+        system_prompt = """You analyze recent WhatsApp golf group messages to find NEW signups or dropouts.
+The original signup message is no longer visible - you are only seeing recent messages.
+
+Look for:
+- NEW SIGNUPS: Someone asking to play, be added, join Sunday, etc. (e.g. "Can I play?", "Add me please", "Count me in for Sunday")
+- DROPOUTS: Someone pulling out, cancelling, can't make it (e.g. "I'm out", "Can't make it", "Pull me out")
+- GUEST ADDITIONS: Someone asking for a guest spot (e.g. "Can I bring a mate?", "Can I have a guest?")
+- GUEST REMOVALS: Someone cancelling a guest
+
+IGNORE: Banter, questions about tee times, general chat, reactions.
+Only include clear signup/dropout intent.
+
+Return JSON with:
+- "add": list of {"name": "SenderName", "guests": [], "preferences": null} for new signups
+- "remove": list of player names dropping out
+- "guest_add": list of {"host": "SenderName", "guest_name": "HostName-Guest"} for guest additions
+- "guest_remove": list of {"host": "SenderName", "guest_name": "name"} for guest removals"""
+
+        user_prompt = f"""RECENT MESSAGES:
+{messages_text}
+
+Return ONLY valid JSON:
+{{"add": [], "remove": [], "guest_add": [], "guest_remove": []}}"""
+
+        try:
+            response = self.client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=1000,
+                temperature=0,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_prompt}]
+            )
+
+            result_text = response.content[0].text.strip()
+            if result_text.startswith("```"):
+                result_text = result_text.split("```")[1]
+                if result_text.startswith("json"):
+                    result_text = result_text[4:]
+                result_text = result_text.rstrip("`")
+            delta = json.loads(result_text)
+
+            has_changes = (delta.get('add') or delta.get('remove') or
+                          delta.get('guest_add') or delta.get('guest_remove'))
+
+            if has_changes:
+                print(f"📝 Delta analysis found changes: +{len(delta.get('add', []))} players, -{len(delta.get('remove', []))} players, +{len(delta.get('guest_add', []))} guests, -{len(delta.get('guest_remove', []))} guests")
+                return {'delta': delta}
+            else:
+                print("📋 Delta analysis: no new signups or dropouts in recent messages")
+                return None
+
+        except Exception as e:
+            print(f"⚠️  Delta analysis error: {e}")
+            return None
 
 
 # ==================== ADMIN COMMAND HANDLER ====================
@@ -1584,7 +1682,7 @@ class TeeSheetGenerator:
                     break
 
         # Fourth pass: Balance groups (avoid very small groups like 2 when we could have 3,3)
-        # If we have a group of 2 and a group of 4, try to move 1 player to make 3,3
+        # If we have a group of 2 and a group of 4, try to move a solo player to make 3,3
         improved = True
         while improved:
             improved = False
@@ -1598,28 +1696,126 @@ class TeeSheetGenerator:
                     if len(tee_groups[j]) <= 3:  # Don't take from groups of 3 or less
                         continue
 
-                    # Try to move 1-2 players from group j to group i
-                    space_needed = 3 - len(tee_groups[i])  # How many to make group i = 3
-                    players_to_move = min(space_needed, len(tee_groups[j]) - 3)  # Keep j at least 3
+                    # Try to move solo players (no guests) from group j to group i
+                    space_needed = 3 - len(tee_groups[i])
+                    gi_names = get_player_names(tee_groups[i])
 
-                    if players_to_move > 0:
-                        # Try to move players without violating avoidances
-                        gi_names = get_player_names(tee_groups[i])
-                        for k in range(len(tee_groups[j]) - 1, -1, -1):  # Start from end
-                            if players_to_move == 0:
-                                break
-                            player_to_move = tee_groups[j][k]
-                            if player_to_move.get('is_host'):  # Only move hosts, not guests
-                                player_name = player_to_move['name']
-                                # Check avoidances
-                                if not any(has_avoidance(player_name, name) for name in gi_names):
-                                    # Move this player
-                                    tee_groups[i].append(tee_groups[j].pop(k))
-                                    players_to_move -= 1
-                                    improved = True
+                    for k in range(len(tee_groups[j]) - 1, -1, -1):
+                        if space_needed == 0:
+                            break
+                        player = tee_groups[j][k]
+                        if not player.get('is_host') or player.get('is_guest'):
+                            continue  # Skip guests
+                        # Skip hosts that have guests in this group (can't split block)
+                        host_name = player['name']
+                        has_guests = any(p.get('brought_by') == host_name for p in tee_groups[j])
+                        if has_guests:
+                            continue
+                        # Check source group stays at 3+ after removal
+                        if len(tee_groups[j]) - 1 < 3:
+                            continue
+                        # Check avoidances
+                        if not any(has_avoidance(host_name, name) for name in gi_names):
+                            tee_groups[i].append(tee_groups[j].pop(k))
+                            space_needed -= 1
+                            improved = True
 
                 if improved:
                     break
+
+        # Fifth pass: Force fit within available tee times
+        # Tee times are pre-booked - we MUST fit within available slots, never TBC
+        max_slots = len(available_tee_times)
+        if len(tee_groups) > max_slots:
+            # Helper: extract host+guest blocks from a list of groups
+            def extract_blocks(groups):
+                blks = []
+                for grp in groups:
+                    seen = set()
+                    for player in grp:
+                        if player.get('is_host') and player['name'] not in seen:
+                            h_name = player['name']
+                            blk = [p for p in grp if p['name'] == h_name or p.get('brought_by') == h_name]
+                            blks.append(blk)
+                            seen.add(h_name)
+                return blks
+
+            # Helper: score how constraint-free a group is (higher = better to break apart)
+            def group_freedom_score(group):
+                score = 0
+                for player in group:
+                    if player.get('is_guest'):
+                        continue
+                    name = player['name']
+                    if name not in partner_prefs:
+                        score += 2
+                    if name not in avoidances:
+                        score += 2
+                    # Solo player (no guests) = easier to redistribute
+                    if not any(p.get('brought_by') == name for p in group):
+                        score += 1
+                    # No tee time preference
+                    pref = next((pp.get('preferences', '') for pp in participants if pp['name'] == name), '')
+                    if not pref:
+                        score += 1
+                return score
+
+            # Phase 1: Decompose non-full groups into blocks
+            full_groups = [g for g in tee_groups if len(g) >= self.config.MAX_GROUP_SIZE]
+            non_full = [g for g in tee_groups if len(g) < self.config.MAX_GROUP_SIZE]
+            blocks = extract_blocks(non_full)
+
+            # Phase 2: If blocks don't fit in remaining slots, break constraint-free full groups
+            target_new = max(0, max_slots - len(full_groups))
+            total_block_players = sum(len(b) for b in blocks)
+            max_capacity = target_new * self.config.MAX_GROUP_SIZE
+
+            while (target_new <= 0 or total_block_players > max_capacity) and full_groups:
+                # Find the most constraint-free full group to break apart
+                best_idx = max(range(len(full_groups)), key=lambda i: group_freedom_score(full_groups[i]))
+                victim = full_groups.pop(best_idx)
+                blocks.extend(extract_blocks([victim]))
+                target_new = max(0, max_slots - len(full_groups))
+                total_block_players = sum(len(b) for b in blocks)
+                max_capacity = target_new * self.config.MAX_GROUP_SIZE
+                print(f"   🔄 Broke apart a {len(victim)}-ball to redistribute players")
+
+            # Phase 3: Pack all blocks into target_new groups using best-fit
+            if target_new > 0 and blocks:
+                blocks.sort(key=len, reverse=True)
+                new_groups = [[] for _ in range(target_new)]
+
+                for block in blocks:
+                    block_names = [p['name'] for p in block if not p.get('is_guest')]
+
+                    # Best-fit: find group with LEAST remaining space that still fits this block
+                    best_idx = None
+                    best_space = float('inf')
+                    for idx, ng in enumerate(new_groups):
+                        space = self.config.MAX_GROUP_SIZE - len(ng)
+                        if space >= len(block):
+                            group_names = get_player_names(ng)
+                            conflict = any(has_avoidance(bn, gn) for bn in block_names for gn in group_names)
+                            if not conflict and space < best_space:
+                                best_idx = idx
+                                best_space = space
+
+                    if best_idx is not None:
+                        new_groups[best_idx].extend(block)
+                    else:
+                        # Avoidance constraints blocking - place anyway (capacity takes priority)
+                        for idx, ng in enumerate(new_groups):
+                            space = self.config.MAX_GROUP_SIZE - len(ng)
+                            if space >= len(block):
+                                new_groups[idx].extend(block)
+                                print(f"⚠️  Placed {block[0]['name']} ignoring avoidance (must fit within tee times)")
+                                break
+
+                tee_groups = full_groups + [g for g in new_groups if g]
+            elif not blocks and len(full_groups) <= max_slots:
+                tee_groups = full_groups
+            else:
+                print(f"⚠️  Cannot fit all players into {max_slots} tee times - capacity exceeded")
 
         # Assign tee times based on preferences
         # Parse player preferences from participants
@@ -2748,6 +2944,37 @@ class SwindleBot:
         sorted_old = sorted(last_snapshot, key=lambda m: (m.get('sender', ''), m.get('text', '')))
         return json.dumps(sorted_new) == json.dumps(sorted_old)
 
+    def _apply_delta(self, delta: Dict):
+        """Apply delta changes (add/remove players/guests) on top of existing DB data - silently"""
+        for player in delta.get('add', []):
+            name = player.get('name')
+            if name:
+                status = self.db.add_player_manually(name, player.get('guests'), player.get('preferences'))
+                if status in ('playing', 'reserve'):
+                    print(f"   ➕ Delta: added {name} ({status})")
+
+        for name in delta.get('remove', []):
+            if name:
+                result = self.db.remove_player_manually(name)
+                if result.get('removed'):
+                    print(f"   ➖ Delta: removed {name}")
+
+        for guest_info in delta.get('guest_add', []):
+            host = guest_info.get('host')
+            guest_name = guest_info.get('guest_name')
+            if host and guest_name:
+                result = self.db.add_guest_manually(host, guest_name)
+                if result.get('success'):
+                    print(f"   ➕ Delta: added guest {guest_name} for {host}")
+
+        for guest_info in delta.get('guest_remove', []):
+            host = guest_info.get('host')
+            guest_name = guest_info.get('guest_name')
+            if guest_name:
+                result = self.db.remove_guest_manually(guest_name, host)
+                if result.get('success'):
+                    print(f"   ➖ Delta: removed guest {guest_name}")
+
     def refresh_main_group(self):
         """Reload WhatsApp Web and do a fresh scan of the main group.
         This ensures a full message load (WhatsApp loads fewer messages on chat re-visits).
@@ -2779,6 +3006,17 @@ class SwindleBot:
             # Analyze with AI
             print(f"🤖 Analyzing {len(messages)} messages with AI...")
             result = self.ai.analyze_messages(messages)
+
+            if result is not None and result.get('delta'):
+                # Delta mode - apply changes on top of existing data
+                self._apply_delta(result['delta'])
+                self.db.save_snapshot(messages)
+                return
+
+            if result is None:
+                # No result at all - keep existing data
+                print("📋 Keeping existing player data")
+                return
 
             if result['players'] or result.get('total_count', 0) > 0:
                 # Safety check: don't overwrite a larger list with a significantly smaller one
@@ -2874,7 +3112,7 @@ class SwindleBot:
         # Clear snapshot so first main group check always does a fresh analysis
         self.db.save_snapshot([])
         print("🔄 Cleared message snapshot - will do fresh analysis on first check")
-        burst_mode_until = 0  # Timestamp when burst mode expires
+        burst_mode_until = 0  # Timestamp when burst mode expires (admin group)
 
         # Initialize admin anchor - save last 3 messages as fingerprint to detect new ones
         try:
@@ -2943,6 +3181,19 @@ class SwindleBot:
                             # Analyze with AI
                             print(f"🤖 Analyzing {len(messages)} messages with AI...")
                             result = self.ai.analyze_messages(messages)
+
+                            if result is not None and result.get('delta'):
+                                # Delta mode - apply changes on top of existing data
+                                self._apply_delta(result['delta'])
+                                self.db.save_snapshot(messages)
+                                last_main_check = current_time
+                                continue
+
+                            if result is None:
+                                # No result at all - keep existing data
+                                print("📋 Keeping existing player data")
+                                last_main_check = current_time
+                                continue
 
                             # Only update database if AI returned valid results
                             # Prevents wiping participants on API errors
@@ -3041,7 +3292,7 @@ class SwindleBot:
                 # Sleep - use burst interval if admin is active, otherwise normal interval
                 in_burst = time.time() < burst_mode_until
                 sleep_time = burst_interval if in_burst else admin_interval
-                minutes_until_next_main = int((main_interval - (time.time() - last_main_check)) / 60)
+                minutes_until_next_main = max(0, int((main_interval - (time.time() - last_main_check)) / 60))
                 if in_burst:
                     print(f"⏰ Next admin check in {sleep_time}s (burst) | main group in {minutes_until_next_main} min...")
                 else:

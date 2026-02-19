@@ -35,7 +35,7 @@ DB_PATH = "data/golf_swindle.db"
 
 # WhatsApp Settings
 MAX_MESSAGES = 200  # Number of recent messages to check in WhatsApp group
-MAIN_GROUP_CHECK_MINUTES = 180  # How often to check the main swindle group (minutes) - on-demand refresh happens for show list/tee sheet commands and scheduled messages
+MAIN_GROUP_CHECK_MINUTES = 10  # How often to check the main swindle group (minutes) - snapshot comparison makes idle checks free
 ADMIN_GROUP_CHECK_SECONDS = 60  # How often to check the admin group (seconds)
 ADMIN_BURST_DURATION_SECONDS = 180  # After a command, check admin group rapidly for this long (seconds)
 ADMIN_BURST_CHECK_SECONDS = 5  # During burst mode, check every N seconds
