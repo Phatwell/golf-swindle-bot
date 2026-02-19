@@ -104,16 +104,29 @@ class Database:
         conn = self._connect()
         cursor = conn.cursor()
 
-        # Simple participants table
+        # Participants table with signup order and reserve status
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS participants (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
                 guests TEXT,
                 preferences TEXT,
+                signup_order INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'playing',
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # Migrate existing databases: add signup_order and status if missing
+        try:
+            cursor.execute("SELECT signup_order FROM participants LIMIT 1")
+        except sqlite3.OperationalError:
+            cursor.execute("ALTER TABLE participants ADD COLUMN signup_order INTEGER NOT NULL DEFAULT 0")
+            cursor.execute("ALTER TABLE participants ADD COLUMN status TEXT NOT NULL DEFAULT 'playing'")
+            rows = cursor.execute("SELECT name FROM participants ORDER BY name").fetchall()
+            for idx, (name,) in enumerate(rows, 1):
+                cursor.execute("UPDATE participants SET signup_order = ? WHERE name = ?", (idx, name))
+            print("   Migrated participants table: added signup_order and status columns")
 
         # Tee sheet table
         cursor.execute("""
@@ -199,11 +212,14 @@ class Database:
         conn.commit()
         conn.close()
 
-    def get_participants(self) -> List[Dict]:
-        """Get all participants"""
+    def get_participants(self, status_filter: str = None) -> List[Dict]:
+        """Get participants, optionally filtered by status ('playing', 'reserve', or None for all)"""
         conn = self._connect()
         cursor = conn.cursor()
-        cursor.execute("SELECT name, guests, preferences FROM participants ORDER BY name")
+        if status_filter:
+            cursor.execute("SELECT name, guests, preferences, signup_order, status FROM participants WHERE status = ? ORDER BY signup_order", (status_filter,))
+        else:
+            cursor.execute("SELECT name, guests, preferences, signup_order, status FROM participants ORDER BY signup_order")
         rows = cursor.fetchall()
         conn.close()
 
@@ -213,25 +229,50 @@ class Database:
             participants.append({
                 'name': row[0],
                 'guests': guests,
-                'preferences': row[2]
+                'preferences': row[2],
+                'signup_order': row[3],
+                'status': row[4]
             })
         return participants
 
-    def update_participants(self, players: List[Dict]):
-        """Replace all participants with new list from AI"""
+    def update_participants(self, players: List[Dict]) -> Dict:
+        """Replace participants with AI list, preserving signup_order for existing players.
+        New players get order based on their position in the AI list (= chat signup order).
+        Returns {'promoted': [names], 'demoted': [names]} after status recalculation."""
         conn = self._connect()
         try:
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM participants")
+
+            # Read existing signup orders before delete
+            cursor.execute("SELECT name, signup_order FROM participants")
+            existing_orders = {name: order for name, order in cursor.fetchall()}
+            max_order = max(existing_orders.values()) if existing_orders else 0
+
+            # Assign signup_order: existing players keep theirs, new players get next available
+            ordered_players = []
             for player in players:
+                name = player['name']
+                if name in existing_orders:
+                    order = existing_orders[name]
+                else:
+                    max_order += 1
+                    order = max_order
+                ordered_players.append((player, order))
+
+            # Replace all participants
+            cursor.execute("DELETE FROM participants")
+            for player, order in ordered_players:
                 guests_json = json.dumps(player.get('guests', []))
                 cursor.execute("""
-                    INSERT INTO participants (name, guests, preferences, updated_at)
-                    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-                """, (player['name'], guests_json, player.get('preferences')))
+                    INSERT INTO participants (name, guests, preferences, signup_order, status, updated_at)
+                    VALUES (?, ?, ?, ?, 'playing', CURRENT_TIMESTAMP)
+                """, (player['name'], guests_json, player.get('preferences'), order))
             conn.commit()
         finally:
             conn.close()
+
+        # Recalculate playing/reserve statuses based on capacity
+        return self.recalculate_statuses()
 
     def clear_participants(self):
         """Clear all participants for new week (also clears time preferences)"""
@@ -285,41 +326,72 @@ class Database:
         finally:
             conn.close()
 
-    def add_player_manually(self, name: str, guests: List[str] = None, preferences: str = None) -> bool:
-        """Manually add a player to the list"""
+    def add_player_manually(self, name: str, guests: List[str] = None, preferences: str = None) -> str:
+        """Manually add a player. Returns 'playing', 'reserve', 'exists', or 'error'."""
         try:
             conn = self._connect()
             cursor = conn.cursor()
+
+            # Check if already exists
+            cursor.execute("SELECT name FROM participants WHERE name = ?", (name,))
+            if cursor.fetchone():
+                conn.close()
+                return 'exists'
+
+            # Get next signup_order
+            cursor.execute("SELECT MAX(signup_order) FROM participants")
+            max_order = cursor.fetchone()[0] or 0
 
             guests_json = json.dumps(guests or [])
             cursor.execute("""
-                INSERT OR REPLACE INTO participants (name, guests, preferences, updated_at)
-                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-            """, (name, guests_json, preferences))
+                INSERT INTO participants (name, guests, preferences, signup_order, status, updated_at)
+                VALUES (?, ?, ?, ?, 'playing', CURRENT_TIMESTAMP)
+            """, (name, guests_json, preferences, max_order + 1))
 
             conn.commit()
             conn.close()
-            return True
+
+            # Recalculate statuses - this player may end up as reserve
+            self.recalculate_statuses()
+
+            # Check what status they got
+            conn = self._connect()
+            cursor = conn.cursor()
+            cursor.execute("SELECT status FROM participants WHERE name = ?", (name,))
+            row = cursor.fetchone()
+            conn.close()
+            return row[0] if row else 'error'
         except Exception as e:
             print(f"❌ Error adding player: {e}")
-            return False
+            return 'error'
 
-    def remove_player_manually(self, name: str) -> bool:
-        """Manually remove a player from the list"""
+    def remove_player_manually(self, name: str) -> Dict:
+        """Manually remove a player. Returns {'removed': bool, 'was_status': str, 'promoted': [names]}."""
         try:
             conn = self._connect()
             cursor = conn.cursor()
+
+            # Check current status before removing
+            cursor.execute("SELECT status FROM participants WHERE name = ?", (name,))
+            row = cursor.fetchone()
+            if not row:
+                conn.close()
+                return {'removed': False, 'was_status': None, 'promoted': []}
+
+            was_status = row[0]
             cursor.execute("DELETE FROM participants WHERE name = ?", (name,))
-            rows_affected = cursor.rowcount
             conn.commit()
             conn.close()
-            return rows_affected > 0
+
+            # Recalculate - may promote reserves if a playing slot freed up
+            changes = self.recalculate_statuses()
+            return {'removed': True, 'was_status': was_status, 'promoted': changes.get('promoted', [])}
         except Exception as e:
             print(f"❌ Error removing player: {e}")
-            return False
+            return {'removed': False, 'was_status': None, 'promoted': []}
 
-    def add_guest_manually(self, host_name: str, guest_name: str) -> bool:
-        """Manually add a guest to a player's list"""
+    def add_guest_manually(self, host_name: str, guest_name: str) -> Dict:
+        """Manually add a guest to a player's list. Returns {'success': bool, 'promoted': [], 'demoted': []}"""
         try:
             conn = self._connect()
             cursor = conn.cursor()
@@ -330,7 +402,7 @@ class Database:
 
             if not row:
                 conn.close()
-                return False
+                return {'success': False, 'promoted': [], 'demoted': []}
 
             guests = json.loads(row[0]) if row[0] else []
             if guest_name not in guests:
@@ -344,13 +416,15 @@ class Database:
 
             conn.commit()
             conn.close()
-            return True
+            # Adding a guest affects capacity usage - recalculate
+            changes = self.recalculate_statuses()
+            return {'success': True, 'promoted': changes.get('promoted', []), 'demoted': changes.get('demoted', [])}
         except Exception as e:
             print(f"❌ Error adding guest: {e}")
-            return False
+            return {'success': False, 'promoted': [], 'demoted': []}
 
-    def remove_guest_manually(self, guest_name: str, host_name: str = None) -> bool:
-        """Manually remove a guest (from specific host or all hosts)"""
+    def remove_guest_manually(self, guest_name: str, host_name: str = None) -> Dict:
+        """Manually remove a guest (from specific host or all hosts). Returns {'success': bool, 'promoted': [], 'demoted': []}"""
         try:
             conn = self._connect()
             cursor = conn.cursor()
@@ -361,7 +435,7 @@ class Database:
                 row = cursor.fetchone()
                 if not row:
                     conn.close()
-                    return False
+                    return {'success': False, 'promoted': [], 'demoted': []}
 
                 guests = json.loads(row[0]) if row[0] else []
                 if guest_name in guests:
@@ -390,14 +464,16 @@ class Database:
 
                 if not removed:
                     conn.close()
-                    return False
+                    return {'success': False, 'promoted': [], 'demoted': []}
 
             conn.commit()
             conn.close()
-            return True
+            # Removing a guest frees capacity - recalculate
+            changes = self.recalculate_statuses()
+            return {'success': True, 'promoted': changes.get('promoted', []), 'demoted': changes.get('demoted', [])}
         except Exception as e:
             print(f"❌ Error removing guest: {e}")
-            return False
+            return {'success': False, 'promoted': [], 'demoted': []}
 
     # ==================== CONSTRAINT MANAGEMENT (Phase 3) ====================
 
@@ -659,6 +735,47 @@ class Database:
         # Convert back to sorted list
         return sorted(list(tee_times))
 
+    def get_capacity(self) -> int:
+        """Max players = number of tee time slots * MAX_GROUP_SIZE"""
+        tee_times = self.generate_tee_times()
+        return len(tee_times) * Config.MAX_GROUP_SIZE
+
+    def recalculate_statuses(self) -> Dict:
+        """Recalculate playing/reserve status based on signup_order and capacity.
+        Returns {'promoted': [names], 'demoted': [names]} for notifications."""
+        capacity = self.get_capacity()
+        conn = self._connect()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT name, guests, signup_order, status FROM participants ORDER BY signup_order")
+            rows = cursor.fetchall()
+
+            spots_used = 0
+            promoted = []
+            demoted = []
+
+            for name, guests_json, signup_order, old_status in rows:
+                guests = json.loads(guests_json) if guests_json else []
+                block_size = 1 + len(guests)
+
+                if spots_used + block_size <= capacity:
+                    new_status = 'playing'
+                    spots_used += block_size
+                else:
+                    new_status = 'reserve'
+
+                if new_status != old_status:
+                    cursor.execute("UPDATE participants SET status = ? WHERE name = ?", (new_status, name))
+                    if new_status == 'playing':
+                        promoted.append(name)
+                    else:
+                        demoted.append(name)
+
+            conn.commit()
+            return {'promoted': promoted, 'demoted': demoted}
+        finally:
+            conn.close()
+
     def add_manual_tee_time(self, time_str: str) -> bool:
         """Add a single tee time manually"""
         try:
@@ -883,11 +1000,13 @@ RULES:
 9. Quoted messages: text before sender's own words is a QUOTE - only use sender's own words.
 10. Guests: "+1" → "[HostName]-Guest". "bringing [Name]" → named guest. If guest also signs up independently, list them as own player only.
 11. Note early/late preferences if mentioned.
-12. MP/Match Play pairings: When someone says "me and [Name] for MP" or similar, both are playing AND want to be paired together. Add to "pairings" array as [sender, named_player]. The named player may not be the exact sender name - use the name as written in the message."""
+12. MP/Match Play pairings: When someone says "me and [Name] for MP" or similar, both are playing AND want to be paired together. Add to "pairings" array as [sender, named_player]. The named player may not be the exact sender name - use the name as written in the message.
+13. CRITICAL: Return players in the ORDER they first signed up (earliest message = first in list). This order determines who gets a playing spot vs goes on the reserves list."""
 
         user_prompt = f"""MESSAGES:
 {messages_text}
 
+IMPORTANT: Players must be listed in the order they FIRST signed up (earliest signup first in list).
 Return ONLY valid JSON:
 {{"players": [{{"name": "SenderName", "guests": [], "preferences": null}}], "pairings": [["Player1", "Player2"]], "total_count": 0, "summary": "", "changes": []}}"""
 
@@ -1753,6 +1872,8 @@ class SwindleBot:
             # Tee time responses
             "tee times configured", "tee time ",
             "manual tee times", "remaining times", "will now use",
+            # Reserve notifications
+            "reserve promoted", "moved to reserves", "moved from reserves",
             # Dynamic content markers
             "constraints", "tee times", "participants",
             "player", "guest",
@@ -1832,7 +1953,7 @@ class SwindleBot:
 
         elif command == 'show_tee_sheet':
             self.refresh_main_group()
-            participants = self.db.get_participants()
+            participants = self.db.get_participants(status_filter='playing')
             published = self.db.get_published_tee_sheet()
 
             if published:
@@ -1868,12 +1989,20 @@ class SwindleBot:
                 print(f"   ❌ No player name found")
                 return
 
-            success = self.db.add_player_manually(player_name)
-            if success:
-                # Send updated list
+            status = self.db.add_player_manually(player_name)
+            if status == 'playing':
                 participant_list = self.generate_participant_list()
-                self.send_to_admin_group(f"✅ Added {player_name}\n\n{participant_list}")
-                print(f"   ✅ Added player: {player_name}")
+                self.send_to_admin_group(f"✅ Added {player_name} (playing)\n\n{participant_list}")
+                print(f"   ✅ Added player: {player_name} (playing)")
+            elif status == 'reserve':
+                reserves = self.db.get_participants(status_filter='reserve')
+                position = next((i+1 for i, r in enumerate(reserves) if r['name'] == player_name), len(reserves))
+                participant_list = self.generate_participant_list()
+                self.send_to_admin_group(f"✅ Added {player_name} to reserves (position {position})\n\n{participant_list}")
+                print(f"   ✅ Added player: {player_name} (reserve position {position})")
+            elif status == 'exists':
+                self.send_to_admin_group(f"⚠️ {player_name} is already in the participants list")
+                print(f"   ⚠️ Player already exists: {player_name}")
             else:
                 self.send_to_admin_group(f"❌ Failed to add {player_name}")
                 print(f"   ❌ Failed to add player")
@@ -1888,12 +2017,18 @@ class SwindleBot:
                 print(f"   ❌ No player name found")
                 return
 
-            success = self.db.remove_player_manually(player_name)
-            if success:
-                # Send updated list
+            result_info = self.db.remove_player_manually(player_name)
+            if result_info.get('removed'):
                 participant_list = self.generate_participant_list()
-                self.send_to_admin_group(f"✅ Removed {player_name}\n\n{participant_list}")
+                msg = f"✅ Removed {player_name}"
+                if result_info.get('promoted'):
+                    promoted_names = ', '.join(result_info['promoted'])
+                    msg += f"\n\n📢 Reserve promoted to playing: {promoted_names}"
+                msg += f"\n\n{participant_list}"
+                self.send_to_admin_group(msg)
                 print(f"   ✅ Removed player: {player_name}")
+                if result_info.get('promoted'):
+                    print(f"   📢 Promoted from reserves: {result_info['promoted']}")
             else:
                 self.send_to_admin_group(f"❌ Player '{player_name}' not found")
                 print(f"   ⚠️  Player not found: {player_name}")
@@ -1909,12 +2044,18 @@ class SwindleBot:
                 print(f"   ❌ Missing guest or host name")
                 return
 
-            success = self.db.add_guest_manually(host_name, guest_name)
-            if success:
-                # Send updated list
+            result_info = self.db.add_guest_manually(host_name, guest_name)
+            if result_info.get('success'):
                 participant_list = self.generate_participant_list()
-                self.send_to_admin_group(f"✅ Added {guest_name} as guest of {host_name}\n\n{participant_list}")
+                msg = f"✅ Added {guest_name} as guest of {host_name}"
+                if result_info.get('demoted'):
+                    demoted_names = ', '.join(result_info['demoted'])
+                    msg += f"\n\n⚠️ Moved to reserves (no space): {demoted_names}"
+                msg += f"\n\n{participant_list}"
+                self.send_to_admin_group(msg)
                 print(f"   ✅ Added guest: {guest_name} for {host_name}")
+                if result_info.get('demoted'):
+                    print(f"   ⚠️ Demoted to reserves: {result_info['demoted']}")
             else:
                 self.send_to_admin_group(f"❌ Failed to add guest. Host '{host_name}' not found?")
                 print(f"   ❌ Failed to add guest")
@@ -1930,13 +2071,19 @@ class SwindleBot:
                 print(f"   ❌ No guest name found")
                 return
 
-            success = self.db.remove_guest_manually(guest_name, host_name)
-            if success:
-                # Send updated list
+            result_info = self.db.remove_guest_manually(guest_name, host_name)
+            if result_info.get('success'):
                 participant_list = self.generate_participant_list()
                 host_text = f" from {host_name}" if host_name else ""
-                self.send_to_admin_group(f"✅ Removed guest {guest_name}{host_text}\n\n{participant_list}")
+                msg = f"✅ Removed guest {guest_name}{host_text}"
+                if result_info.get('promoted'):
+                    promoted_names = ', '.join(result_info['promoted'])
+                    msg += f"\n\n📢 Reserve promoted to playing: {promoted_names}"
+                msg += f"\n\n{participant_list}"
+                self.send_to_admin_group(msg)
                 print(f"   ✅ Removed guest: {guest_name}")
+                if result_info.get('promoted'):
+                    print(f"   📢 Promoted from reserves: {result_info['promoted']}")
             else:
                 self.send_to_admin_group(f"❌ Guest '{guest_name}' not found")
                 print(f"   ⚠️  Guest not found: {guest_name}")
@@ -2106,13 +2253,20 @@ class SwindleBot:
             if success:
                 times = self.db.generate_tee_times()
                 times_preview = ', '.join(times[:5]) + (f"... (+{len(times)-5} more)" if len(times) > 5 else "")
-                self.send_to_admin_group(
+                # Capacity changed - recalculate statuses
+                changes = self.db.recalculate_statuses()
+                msg = (
                     f"✅ Tee times configured\n\n"
                     f"Start: {start_time}\n"
                     f"Interval: {interval} minutes\n"
                     f"Slots: {num_slots}\n\n"
                     f"Times: {times_preview}"
                 )
+                if changes.get('promoted'):
+                    msg += f"\n\n📢 Reserve promoted to playing: {', '.join(changes['promoted'])}"
+                if changes.get('demoted'):
+                    msg += f"\n\n⚠️ Moved to reserves (no space): {', '.join(changes['demoted'])}"
+                self.send_to_admin_group(msg)
                 print(f"   ✅ Set tee times: {start_time}, {interval}min, {num_slots} slots")
             else:
                 self.send_to_admin_group("❌ Failed to set tee times")
@@ -2215,7 +2369,12 @@ class SwindleBot:
             if success:
                 manual_times = self.db.get_manual_tee_times()
                 times_str = ', '.join(manual_times)
-                self.send_to_admin_group(f"✅ Added tee time: {tee_time}\n\n📋 Manual tee times:\n{times_str}")
+                # Capacity increased - recalculate (may promote reserves)
+                changes = self.db.recalculate_statuses()
+                msg = f"✅ Added tee time: {tee_time}\n\n📋 Manual tee times:\n{times_str}"
+                if changes.get('promoted'):
+                    msg += f"\n\n📢 Reserve promoted to playing: {', '.join(changes['promoted'])}"
+                self.send_to_admin_group(msg)
                 print(f"   ✅ Added tee time: {tee_time}")
             else:
                 self.send_to_admin_group(f"⚠️  Tee time {tee_time} already exists")
@@ -2235,11 +2394,16 @@ class SwindleBot:
             success = self.db.remove_manual_tee_time(tee_time)
             if success:
                 manual_times = self.db.get_manual_tee_times()
+                # Capacity decreased - recalculate (may demote to reserves)
+                changes = self.db.recalculate_statuses()
                 if manual_times:
                     times_str = ', '.join(manual_times)
-                    self.send_to_admin_group(f"✅ Removed tee time: {tee_time}\n\n📋 Remaining times:\n{times_str}")
+                    msg = f"✅ Removed tee time: {tee_time}\n\n📋 Remaining times:\n{times_str}"
                 else:
-                    self.send_to_admin_group(f"✅ Removed tee time: {tee_time}\n\n⏰ No manual times left - will use auto-generated times")
+                    msg = f"✅ Removed tee time: {tee_time}\n\n⏰ No manual times left - will use auto-generated times"
+                if changes.get('demoted'):
+                    msg += f"\n\n⚠️ Moved to reserves (no space): {', '.join(changes['demoted'])}"
+                self.send_to_admin_group(msg)
                 print(f"   ✅ Removed tee time: {tee_time}")
             else:
                 self.send_to_admin_group(f"⚠️  Tee time {tee_time} not found")
@@ -2248,7 +2412,14 @@ class SwindleBot:
         elif command == 'clear_tee_times':
             # Clear all manual tee times
             self.db.clear_manual_tee_times()
-            self.send_to_admin_group("✅ Cleared all manual tee times\n\n⏰ Will now use auto-generated times from settings")
+            # Capacity changed - recalculate
+            changes = self.db.recalculate_statuses()
+            msg = "✅ Cleared all manual tee times\n\n⏰ Will now use auto-generated times from settings"
+            if changes.get('promoted'):
+                msg += f"\n\n📢 Reserve promoted to playing: {', '.join(changes['promoted'])}"
+            if changes.get('demoted'):
+                msg += f"\n\n⚠️ Moved to reserves (no space): {', '.join(changes['demoted'])}"
+            self.send_to_admin_group(msg)
             print(f"   ✅ Cleared manual tee times")
 
         elif command == 'clear_time_preferences':
@@ -2405,8 +2576,8 @@ class SwindleBot:
             print(f"   ✅ Moved {player_name} to group {target_group} (group {src_group+1}: {src_size} players, group {target_group}: {dst_size} players)")
 
         elif command == 'randomize':
-            # Randomize the tee sheet (full fresh generation)
-            participants = self.db.get_participants()
+            # Randomize the tee sheet (full fresh generation) - playing only, no reserves
+            participants = self.db.get_participants(status_filter='playing')
             if not participants:
                 self.send_to_admin_group("❌ No participants to generate tee sheet for")
                 return
@@ -2429,29 +2600,46 @@ class SwindleBot:
             # Command recognized but not implemented yet
             print(f"   ⚠️  Command '{command}' not implemented yet")
 
-    def generate_participant_list(self) -> str:
-        """Generate formatted participant list"""
-        participants = self.db.get_participants()
+    def _format_player_line(self, p: Dict) -> str:
+        """Format a single player line with guests and preferences"""
+        guests = p.get('guests', [])
+        guest_text = f" (bringing: {', '.join(guests)})" if guests else ""
+        pref_text = f" - {p['preferences']}" if p.get('preferences') else ""
+        return f"{p['name']}{guest_text}{pref_text}"
 
-        if not participants:
+    def generate_participant_list(self) -> str:
+        """Generate formatted participant list with capacity and reserves"""
+        playing = self.db.get_participants(status_filter='playing')
+        reserves = self.db.get_participants(status_filter='reserve')
+        capacity = self.db.get_capacity()
+
+        if not playing and not reserves:
             return f'🏌️ *Shanks Update*\n\nNo names in yet - it\'s looking quiet out there!'
 
-        total = sum(1 + len(p.get('guests', [])) for p in participants)
+        playing_spots = sum(1 + len(p.get('guests', [])) for p in playing)
+        reserve_spots = sum(1 + len(p.get('guests', [])) for p in reserves)
 
         lines = [f'🏌️ *Shanks Update*\n']
-        lines.append(f'👥 {len(participants)} signed up ({total} total with guests)\n')
 
-        for p in participants:
-            guests = p.get('guests', [])
-            if guests:
-                guest_names = ', '.join(guests)
-                guest_text = f" (bringing: {guest_names})"
-            else:
-                guest_text = ""
-            pref_text = f" - {p['preferences']}" if p.get('preferences') else ""
-            lines.append(f"• {p['name']}{guest_text}{pref_text}")
+        # Capacity line
+        spaces_left = capacity - playing_spots
+        if spaces_left > 0:
+            lines.append(f'👥 {playing_spots}/{capacity} spots filled ({spaces_left} spaces left)\n')
+        else:
+            lines.append(f'👥 {playing_spots}/{capacity} spots filled - *FULL*\n')
 
-        lines.append(f"\nIf you're playing and not on the list, give us a shout!")
+        # Playing list
+        for p in playing:
+            lines.append(f"• {self._format_player_line(p)}")
+
+        # Reserves section
+        if reserves:
+            lines.append(f"\n📋 *Reserves* ({len(reserves)}):")
+            for i, p in enumerate(reserves, 1):
+                lines.append(f"{i}. {self._format_player_line(p)}")
+            lines.append(f"\nIf someone drops out, reserves move up automatically!")
+        else:
+            lines.append(f"\nIf you're playing and not on the list, give us a shout!")
 
         return '\n'.join(lines)
 
@@ -2590,11 +2778,16 @@ class SwindleBot:
                 if existing_count > 0 and new_count < existing_count * 0.7:
                     print(f"⚠️  AI returned {new_count} players but DB has {existing_count} - keeping existing data (possible scrape issue)")
                 else:
-                    self.db.update_participants(result['players'])
+                    changes = self.db.update_participants(result['players'])
                     self.db.save_snapshot(messages)
                     if result.get('pairings'):
                         self.db.save_weekly_pairings(result['pairings'])
                     print(f"✅ Refreshed: {result['total_count']} players")
+                    # Notify admin group if reserves were promoted
+                    if changes.get('promoted'):
+                        promoted_names = ', '.join(changes['promoted'])
+                        self.send_to_admin_group(f"📢 Reserve promoted to playing: {promoted_names}")
+                        print(f"   📢 Promoted from reserves: {changes['promoted']}")
             else:
                 existing = self.db.get_participants()
                 if existing:
@@ -2612,10 +2805,10 @@ class SwindleBot:
         self.send_to_admin_group(participant_list)
 
     def generate_saturday_tee_sheet(self):
-        """Generate Saturday 5pm tee sheet and publish it (locks in groups/times)"""
+        """Generate Saturday 5pm tee sheet and publish it (locks in groups/times) - playing only, no reserves"""
         print("⏰ Generating Saturday tee sheet...")
         self.refresh_main_group()
-        participants = self.db.get_participants()
+        participants = self.db.get_participants(status_filter='playing')
         partner_prefs = self.db.get_partner_preferences()
         avoidances = self.db.get_avoidances()
         available_times = self.db.generate_tee_times()
@@ -2751,11 +2944,16 @@ class SwindleBot:
                                 if existing_count > 0 and new_count < existing_count * 0.7:
                                     print(f"⚠️  AI returned {new_count} players but DB has {existing_count} - keeping existing data (possible scrape issue)")
                                 else:
-                                    self.db.update_participants(result['players'])
+                                    changes = self.db.update_participants(result['players'])
                                     self.db.save_snapshot(messages)
                                     # Save any AI-detected MP pairings as weekly constraints
                                     if result.get('pairings'):
                                         self.db.save_weekly_pairings(result['pairings'])
+                                    # Notify admin group if reserves were promoted
+                                    if changes.get('promoted'):
+                                        promoted_names = ', '.join(changes['promoted'])
+                                        self.send_to_admin_group(f"📢 Reserve promoted to playing: {promoted_names}")
+                                        print(f"   📢 Promoted from reserves: {changes['promoted']}")
                             else:
                                 existing = self.db.get_participants()
                                 if existing:

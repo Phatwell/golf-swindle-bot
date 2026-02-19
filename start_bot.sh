@@ -12,7 +12,7 @@ fi
 
 # Activate venv and start bot
 echo "Starting Golf Swindle Bot..."
-nohup ./venv/bin/python3 src/swindle_bot_v5_admin.py > logs/bot.log 2>&1 &
+nohup ./venv/bin/python3 -u src/swindle_bot_v5_admin.py > logs/bot.log 2>&1 &
 
 BOT_PID=$!
 echo "✅ Bot started in background"
