@@ -990,7 +990,7 @@ class AIAnalyzer:
 
 RULES:
 1. Player names = exact [SenderName] from brackets. Never invent names.
-2. ORGANIZER posts "now taking names" - NOT a player unless they separately sign up.
+2. ORGANIZER posts "now taking names" - NOT a player unless they separately sign up OR list themselves in a recap message.
 3. Only messages AFTER "taking names" count. Earlier messages are previous weeks.
 4. Latest message per person = truth (people change minds).
 5. Skip [Unknown] senders.
@@ -998,10 +998,12 @@ RULES:
 7. NOT PLAYING: "I'm out", "can't make it", illness mentions
 8. IGNORE: questions, banter, emoji reactions, organisational chat
 9. Quoted messages: text before sender's own words is a QUOTE - only use sender's own words.
-10. Guests: "+1" → "[HostName]-Guest". "bringing [Name]" → named guest. If guest also signs up independently, list them as own player only.
-11. Note early/late preferences if mentioned.
-12. MP/Match Play pairings: When someone says "me and [Name] for MP" or similar, both are playing AND want to be paired together. Add to "pairings" array as [sender, named_player]. The named player may not be the exact sender name - use the name as written in the message.
-13. CRITICAL: Return players in the ORDER they first signed up (earliest message = first in list). This order determines who gets a playing spot vs goes on the reserves list."""
+10. Guests: ONLY "+1" or "can I have a guest" → "[HostName]-Guest" (anonymous guest). "bringing [Name]" where [Name] is not a group member → named guest.
+11. SIGNING UP OTHERS: "me and X please" or "me X and Y please" = the sender PLUS X and Y as SEPARATE PLAYERS (not guests). They are independent players signed up by a friend. Use the names as written. If any of them later send their own message, they are confirmed as their own player.
+12. Note early/late preferences if mentioned.
+13. MP/Match Play pairings: When someone says "me and [Name] for MP" or similar, both are playing AND want to be paired together. Add to "pairings" array as [sender, named_player]. The named player may not be the exact sender name - use the name as written in the message.
+14. RECAP MESSAGES: The organizer may post a list of names as a recap. Use this to CONFIRM players but also check if the organizer included themselves in the list - if so, they are also playing.
+15. CRITICAL: Return players in the ORDER they first signed up (earliest message = first in list). This order determines who gets a playing spot vs goes on the reserves list."""
 
         user_prompt = f"""MESSAGES:
 {messages_text}
@@ -1012,7 +1014,7 @@ Return ONLY valid JSON:
 
         try:
             response = self.client.messages.create(
-                model="claude-sonnet-4-5-20250929",
+                model="claude-haiku-4-5-20251001",
                 max_tokens=1000,
                 temperature=0,
                 system=system_prompt,
@@ -2614,12 +2616,12 @@ class SwindleBot:
         capacity = self.db.get_capacity()
 
         if not playing and not reserves:
-            return f'🏌️ *Shanks Update*\n\nNo names in yet - it\'s looking quiet out there!'
+            return f'🏌️ *Shanks Bot Update*\n\nNo names in yet - it\'s looking quiet out there!'
 
         playing_spots = sum(1 + len(p.get('guests', [])) for p in playing)
         reserve_spots = sum(1 + len(p.get('guests', [])) for p in reserves)
 
-        lines = [f'🏌️ *Shanks Update*\n']
+        lines = [f'🏌️ *Shanks Bot Update*\n']
 
         # Capacity line
         spaces_left = capacity - playing_spots
@@ -2661,7 +2663,7 @@ class SwindleBot:
         print("   - Tee time settings kept (season-long)")
 
         # Send notification to admin group
-        message = "🏌️ *Shanks - New Week!*\n\nSlate wiped clean, ready for a fresh one.\n\n✅ *Cleared:*\n- Participants\n- Time preferences\n- Tee time modifications\n- Published tee sheet\n- MP pairings\n\n🔒 *Kept:*\n- Partner preferences\n- Tee time settings"
+        message = "🏌️ *Shanks Bot - New Week!*\n\nSlate wiped clean, ready for a fresh one.\n\n✅ *Cleared:*\n- Participants\n- Time preferences\n- Tee time modifications\n- Published tee sheet\n- MP pairings\n\n🔒 *Kept:*\n- Partner preferences\n- Tee time settings"
         self.send_to_admin_group(message)
 
     def send_weekly_opening(self):
@@ -2669,7 +2671,7 @@ class SwindleBot:
         print("⏰ Sending weekly opening message...")
         sunday = datetime.now() + timedelta(days=6)
         message = (
-            f"🏌️ *Shanks here!* Now taking names for Sunday {sunday.strftime('%d/%m/%Y')}. Drop your name in the group if you're playing!\n\n"
+            f"🏌️ *Shanks Bot here!* Now taking names for Sunday {sunday.strftime('%d/%m/%Y')}. Drop your name in the group if you're playing!\n\n"
             f"Quick one - please make sure your WhatsApp display name is your *full name* so I can find you!\n"
             f"_Settings > tap your name > edit_"
         )
@@ -2679,7 +2681,7 @@ class SwindleBot:
         """Send health check to admin group"""
         print("⏰ Sending health check...")
         now = datetime.now()
-        message = f"🏌️ *Shanks* is alive and well! Still on the job.\n_{now.strftime('%d/%m/%Y %H:%M')}_"
+        message = f"🏌️ *Shanks Bot* is alive and well! Still on the job.\n_{now.strftime('%d/%m/%Y %H:%M')}_"
         self.send_to_admin_group(message)
 
     def send_startup_message(self):
@@ -2708,7 +2710,7 @@ class SwindleBot:
             "Clear time preferences",
             "Randomize"
         ]
-        admin_msg = f"🏌️ *Shanks is online!* Ready to go at {now.strftime('%H:%M')}.\n\n*Commands:*\n" + "\n".join(f"  - {cmd}" for cmd in commands)
+        admin_msg = f"🏌️ *Shanks Bot is online!* Ready to go at {now.strftime('%H:%M')}.\n\n*Commands:*\n" + "\n".join(f"  - {cmd}" for cmd in commands)
         self.send_to_admin_group(admin_msg)
 
     def _find_new_admin_messages(self, current_messages: list) -> list:
@@ -2817,7 +2819,7 @@ class SwindleBot:
         )
         # Save as published sheet - future changes will only minimally adjust
         self.db.save_published_tee_sheet(groups, assigned_times, tee_sheet)
-        self.send_to_admin_group(f"🏌️ *Shanks has the final tee sheet!*\n\nThis is now locked in. Any changes from here will only tweak the affected groups.\n\n{tee_sheet}")
+        self.send_to_admin_group(f"🏌️ *Shanks Bot has the final tee sheet!*\n\nThis is now locked in. Any changes from here will only tweak the affected groups.\n\n{tee_sheet}")
         print("✅ Tee sheet published - future changes will use minimal adjustments")
 
     def schedule_jobs(self):
