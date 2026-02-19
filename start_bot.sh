@@ -10,7 +10,11 @@ if [ ! -d "venv" ]; then
     ./venv/bin/pip install -r requirements.txt
 fi
 
-# Activate venv and start bot
+# Stop any existing bot + Chrome processes first
+./stop_bot.sh 2>/dev/null
+sleep 2
+
+# Start bot
 echo "Starting Golf Swindle Bot..."
 nohup ./venv/bin/python3 -u src/swindle_bot_v5_admin.py > logs/bot.log 2>&1 &
 
@@ -20,5 +24,5 @@ echo "PID: $BOT_PID"
 echo ""
 echo "Commands:"
 echo "  View logs:  tail -f logs/bot.log"
-echo "  Stop bot:   pkill -f swindle_bot_v5_admin.py"
+echo "  Stop bot:   ./stop_bot.sh"
 echo "  Check status: ps aux | grep swindle_bot"

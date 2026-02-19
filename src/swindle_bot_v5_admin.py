@@ -1168,9 +1168,17 @@ class WhatsAppBot:
         try:
             self.wait.until(EC.presence_of_element_located((By.XPATH, '//div[@contenteditable="true"][@data-tab="3"]')))
             print("✅ Already logged in!")
-            return True
         except:
             print("❌ Not logged in - QR code scan needed")
+            return False
+
+        # Health check - verify Chrome is responsive before proceeding
+        try:
+            self.driver.execute_script("return document.readyState")
+            print("✅ Chrome health check passed")
+            return True
+        except Exception as e:
+            print(f"❌ Chrome health check failed: {e}")
             return False
 
     def needs_restart(self) -> bool:
