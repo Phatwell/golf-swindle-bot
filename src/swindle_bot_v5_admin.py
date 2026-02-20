@@ -1027,11 +1027,18 @@ class AIAnalyzer:
             if not is_pure_organizer_quote:
                 final_messages.append(msg)
 
-        # Format messages for AI
-        messages_text = "\n".join([
-            f"[{msg['sender']}]: {msg['text']}"
-            for msg in final_messages
-        ])
+        # Format messages for AI (include timestamps for chronological context)
+        def format_msg_line(msg):
+            ts = msg.get('timestamp', '')
+            if ts and '[' in ts and ']' in ts:
+                try:
+                    time_part = ts.split('[')[1].split(']')[0]  # "HH:MM, DD/MM/YYYY"
+                    return f"[{time_part}] [{msg['sender']}]: {msg['text']}"
+                except:
+                    pass
+            return f"[{msg['sender']}]: {msg['text']}"
+
+        messages_text = "\n".join([format_msg_line(msg) for msg in final_messages])
 
         system_prompt = """You extract golf signup data from WhatsApp messages. Be deterministic and precise.
 
@@ -1039,7 +1046,7 @@ RULES:
 1. Player names = exact [SenderName] from brackets. Never invent names.
 2. ORGANIZER posts "now taking names" - NOT a player unless they separately sign up OR list themselves in a recap message.
 3. Only messages AFTER "taking names" count. Earlier messages are previous weeks.
-4. Latest message per person = truth (people change minds).
+4. Latest message per person = truth (people change minds). Messages have timestamps like [HH:MM, DD/MM/YYYY] — use these to determine which message is newest. A later timestamp always overrides an earlier one (e.g. if someone says "please" at 10:30 but "take me off" at 14:00, they are OUT).
 5. Skip [Unknown] senders.
 6. PLAYING: "I'm in", "yes please", "count me in", "please", "me", "yes"
 7. NOT PLAYING: "I'm out", "can't make it", illness mentions
@@ -1096,10 +1103,17 @@ Return ONLY valid JSON:
     def _analyze_delta(self, messages: List[Dict]) -> Optional[Dict]:
         """Analyze recent messages for new signups/dropouts when 'taking names' is not visible.
         Returns a delta result with 'add' and 'remove' lists, or None if nothing found."""
-        messages_text = "\n".join([
-            f"[{msg['sender']}]: {msg['text']}"
-            for msg in messages
-        ])
+        def format_msg_line(msg):
+            ts = msg.get('timestamp', '')
+            if ts and '[' in ts and ']' in ts:
+                try:
+                    time_part = ts.split('[')[1].split(']')[0]
+                    return f"[{time_part}] [{msg['sender']}]: {msg['text']}"
+                except:
+                    pass
+            return f"[{msg['sender']}]: {msg['text']}"
+
+        messages_text = "\n".join([format_msg_line(msg) for msg in messages])
 
         system_prompt = """You analyze recent WhatsApp golf group messages to find NEW signups or dropouts.
 The original signup message is no longer visible - you are only seeing recent messages.
@@ -1426,45 +1440,44 @@ class WhatsAppBot:
                     break
                 time.sleep(1)
 
-            # Get ALL messages - both incoming and outgoing
-            messages = []
-            message_elements_in = self.driver.find_elements(By.CSS_SELECTOR, '.message-in')
-            message_elements_out = self.driver.find_elements(By.CSS_SELECTOR, '.message-out')
-            message_elements = message_elements_in + message_elements_out
+            # Scroll up and accumulate messages (WhatsApp Web virtualises — unloads messages as you scroll)
+            # We scroll up in steps, extracting messages at each position, until we find "taking names"
+            STOP_PHRASES = ['taking names for sunday', 'names for sunday']
+            MAX_SCROLL_ATTEMPTS = 50
+            SCROLL_PIXELS = 3000
 
-            for elem in message_elements[-Config.MAX_MESSAGES:]:
+            def extract_message_from_element(elem):
+                """Extract a single message dict from a DOM element."""
                 try:
-                    # Check if this is an outgoing message
                     is_outgoing = 'message-out' in elem.get_attribute('class')
-
                     sender = "Unknown"
+                    timestamp = ""
 
-                    # BULLETPROOF EXTRACTION - Based on HTML structure analysis
+                    # Try to get data-pre-plain-text (contains timestamp + sender)
+                    # Format: [HH:MM, DD/MM/YYYY] Name:
+                    try:
+                        copyable = elem.find_element(By.CSS_SELECTOR, '.copyable-text')
+                        pre_text = copyable.get_attribute('data-pre-plain-text') if copyable else None
+                        if pre_text:
+                            timestamp = pre_text
+                    except:
+                        pass
 
-                    # For INCOMING messages: Extract from span or data-pre-plain-text
                     if not is_outgoing:
-                        # Method 1: Find first span[dir="auto"] - this is the sender name
                         try:
                             spans = elem.find_elements(By.XPATH, './/span[@dir="auto"]')
                             if spans and len(spans) > 0:
                                 sender_text = spans[0].text.strip()
-                                # Validate it's not a timestamp (HH:MM format)
                                 if sender_text and ':' not in sender_text and len(sender_text) > 0:
                                     sender = sender_text
                         except:
                             pass
 
-                        # Method 2: Fallback to data-pre-plain-text
-                        if sender == "Unknown":
+                        if sender == "Unknown" and timestamp and ']:' in timestamp:
                             try:
-                                pre_text = elem.get_attribute('data-pre-plain-text')
-                                if pre_text and ']:' in pre_text:
-                                    # Format: [HH:MM, DD/MM/YYYY] Name or Phone:
-                                    sender = pre_text.split(']')[1].strip().rstrip(':').strip()
+                                sender = timestamp.split(']')[1].strip().rstrip(':').strip()
                             except:
                                 pass
-
-                    # For OUTGOING messages: Use admin name directly
                     else:
                         for admin in self.config.ADMIN_USERS:
                             if not admin.isdigit():
@@ -1473,46 +1486,140 @@ class WhatsAppBot:
                         if sender == "Unknown":
                             sender = "You"
 
-                    # Clean up sender name FIRST (before fallback extraction)
                     if sender != "Unknown":
-                        # Remove WhatsApp status prefixes (Maybe = pending contact)
                         sender = sender.replace('Maybe ', '').replace('maybe ', '')
-                        sender = sender.replace('+44 ', '+44').strip()  # Clean up phone formatting
-                        # Keep punctuation names like "." - they're valid WhatsApp names
-                        # Only mark as unknown if completely empty after trimming whitespace
+                        sender = sender.replace('+44 ', '+44').strip()
                         if len(sender.strip()) < 1:
                             sender = "Unknown"
 
-                    # Get message text
                     message_elem = elem.find_element(By.CSS_SELECTOR, '.copyable-text')
                     text = message_elem.text if message_elem else ""
 
-                    # Method 3: Last resort - extract from first line of text (incoming messages only)
-                    # This catches cases where name is "." or other invalid chars that got cleaned to Unknown
                     if sender == "Unknown" and not is_outgoing and text:
                         lines = text.split('\n')
                         if len(lines) > 1:
                             first_line = lines[0].strip()
-                            # If first line looks like a name (short, no special chars)
                             if len(first_line) < 50 and not first_line.endswith('?'):
                                 sender = first_line
-                                # Remove first line from text since it's the sender
                                 text = '\n'.join(lines[1:]).strip()
 
-                    # Apply name mapping (convert WhatsApp names to real names)
                     if sender in self.config.NAME_MAPPING:
                         sender = self.config.NAME_MAPPING[sender]
 
-                    # Only include messages with text
                     if text and text.strip():
-                        messages.append({
+                        return {
                             'sender': sender,
                             'text': text,
-                            'is_outgoing': is_outgoing
-                        })
-                except Exception as e:
-                    # Debug: print parse errors
-                    continue
+                            'is_outgoing': is_outgoing,
+                            'timestamp': timestamp
+                        }
+                except:
+                    pass
+                return None
+
+            # Find scroll container
+            scroll_container = None
+            try:
+                first_msg = self.driver.find_element(By.CSS_SELECTOR, '.message-in, .message-out')
+                scroll_container = self.driver.execute_script("""
+                    let el = arguments[0];
+                    while (el) {
+                        let style = getComputedStyle(el);
+                        let isScrollable = (style.overflowY === 'auto' || style.overflowY === 'scroll')
+                                           && el.scrollHeight > el.clientHeight;
+                        if (isScrollable && el.clientHeight > 200) {
+                            return el;
+                        }
+                        el = el.parentElement;
+                    }
+                    return null;
+                """, first_msg)
+                if not scroll_container:
+                    scroll_container = self.driver.execute_script("""
+                        let el = arguments[0];
+                        while (el) {
+                            if (el.scrollHeight > el.clientHeight && el.clientHeight > 200) {
+                                return el;
+                            }
+                            el = el.parentElement;
+                        }
+                        return null;
+                    """, first_msg)
+            except:
+                pass
+
+            # Accumulate messages across scroll positions
+            accumulated = {}  # key: (sender, text_first_80) -> message dict
+
+            # Collect initial messages from current position
+            for elem in self.driver.find_elements(By.CSS_SELECTOR, '.message-in, .message-out'):
+                msg = extract_message_from_element(elem)
+                if msg:
+                    key = (msg['sender'], msg['text'][:80])
+                    accumulated[key] = msg
+
+            # Scroll up and collect until we find "taking names" or exhaust scrolling
+            found_stop = False
+            if scroll_container:
+                no_new_count = 0
+                for scroll_i in range(MAX_SCROLL_ATTEMPTS):
+                    self.driver.execute_script(f"arguments[0].scrollBy(0, -{SCROLL_PIXELS});", scroll_container)
+                    time.sleep(1.5)
+
+                    new_count = 0
+                    for elem in self.driver.find_elements(By.CSS_SELECTOR, '.message-in, .message-out'):
+                        msg = extract_message_from_element(elem)
+                        if msg:
+                            key = (msg['sender'], msg['text'][:80])
+                            if key not in accumulated:
+                                accumulated[key] = msg
+                                new_count += 1
+
+                    # Check for stop phrase
+                    for key, msg in accumulated.items():
+                        text_lower = msg['text'].lower()
+                        if any(phrase in text_lower for phrase in STOP_PHRASES):
+                            found_stop = True
+                            break
+
+                    if found_stop:
+                        print(f"   Scrolled {scroll_i+1}x — found 'taking names' message, accumulated {len(accumulated)} messages")
+                        break
+
+                    if new_count == 0:
+                        no_new_count += 1
+                        if no_new_count >= 3:
+                            print(f"   Scrolled {scroll_i+1}x — reached top of history, accumulated {len(accumulated)} messages")
+                            break
+                    else:
+                        no_new_count = 0
+
+                if not found_stop and no_new_count < 3:
+                    print(f"   Scrolled {MAX_SCROLL_ATTEMPTS}x (max), accumulated {len(accumulated)} messages")
+            else:
+                print(f"   ⚠️ No scroll container found, using {len(accumulated)} initial messages")
+
+            # Convert accumulated dict to list, sorted by timestamp
+            # data-pre-plain-text format: [HH:MM, DD/MM/YYYY] Name:
+            def parse_sort_key(msg):
+                ts = msg.get('timestamp', '')
+                if ts and '[' in ts and ']' in ts:
+                    try:
+                        bracket_content = ts.split('[')[1].split(']')[0]  # "HH:MM, DD/MM/YYYY"
+                        parts = bracket_content.split(', ')
+                        if len(parts) == 2:
+                            time_str = parts[0].strip()  # "HH:MM"
+                            date_str = parts[1].strip()  # "DD/MM/YYYY"
+                            # Convert to sortable format: YYYY/MM/DD HH:MM
+                            date_parts = date_str.split('/')
+                            if len(date_parts) == 3:
+                                return f"{date_parts[2]}/{date_parts[1]}/{date_parts[0]} {time_str}"
+                    except:
+                        pass
+                return "9999/99/99 99:99"  # No timestamp — sort to end
+
+            messages = sorted(accumulated.values(), key=parse_sort_key)[-Config.MAX_MESSAGES:]
+            print(f"   📨 Total messages to analyse: {len(messages)}")
 
             return messages
 
@@ -2465,7 +2572,7 @@ class SwindleBot:
 
             if not player_name or not target_name:
                 self.send_to_admin_group("❌ Error: Need both player names")
-                print(f"   ❌ Missing player or target name")
+                print(f"   �� Missing player or target name")
                 return
 
             success = self.db.add_constraint('avoid', player_name, target_name)
@@ -3101,7 +3208,9 @@ class SwindleBot:
             "Add tee time [HH:MM]",
             "Remove tee time [HH:MM]",
             "Clear tee times",
+            "Clear tee sheet",
             "Clear time preferences",
+            "Clear participants",
             "Randomize"
         ]
         admin_msg = f"🏌️ *Shanks Bot is online!* Ready to go at {now.strftime('%H:%M')}.\n\n*Commands:*\n" + "\n".join(f"  - {cmd}" for cmd in commands)
