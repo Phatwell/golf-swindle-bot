@@ -1576,6 +1576,19 @@ class TeeSheetGenerator:
     def __init__(self, config: Config):
         self.config = config
 
+    def _format_date_lines(self):
+        """Format date lines for tee sheet: swindle date + generated timestamp"""
+        now = datetime.now()
+        days_until_sunday = (6 - now.weekday()) % 7
+        if days_until_sunday == 0 and now.hour >= 12:
+            days_until_sunday = 0  # It's Sunday afternoon, swindle is today
+        elif days_until_sunday == 0:
+            days_until_sunday = 0  # It's Sunday morning, swindle is today
+        sunday = now + timedelta(days=days_until_sunday)
+        swindle_line = f"📅 Sunday {sunday.strftime('%d/%m/%Y')}"
+        generated_line = f"⏰ Generated: {now.strftime('%a %d/%m at %H:%M')}"
+        return f"{swindle_line}\n{generated_line}"
+
     def generate(self, participants: List[Dict], partner_prefs: Dict[str, List[str]] = None, avoidances: Dict[str, List[str]] = None, available_tee_times: List[str] = None) -> tuple:
         """
         Generate tee sheet from participants
@@ -1955,7 +1968,7 @@ class TeeSheetGenerator:
 
         # Format tee sheet
         lines = [f"🏌️ *{self.config.GROUP_NAME.upper()} TEE SHEET* 🏌️\n"]
-        lines.append(f"📅 {datetime.now().strftime('%d/%m/%Y')}\n")
+        lines.append(f"{self._format_date_lines()}\n")
         lines.append(f"👥 {total_players} players, {len(tee_groups)} groups\n")
 
         # Show tee time utilization - list which times can be returned
@@ -2103,7 +2116,7 @@ class TeeSheetGenerator:
             changes.append(f"Added: {', '.join(new_players)}")
 
         lines = [f"🏌️ *{self.config.GROUP_NAME.upper()} TEE SHEET (UPDATED)* 🏌️\n"]
-        lines.append(f"📅 {datetime.now().strftime('%d/%m/%Y')}\n")
+        lines.append(f"{self._format_date_lines()}\n")
         lines.append(f"👥 {total_players} players, {len(groups)} groups\n")
         if changes:
             lines.append(f"🔄 Changes: {'; '.join(changes)}\n")
@@ -2852,7 +2865,7 @@ class SwindleBot:
             # Rebuild tee sheet text
             total_players = sum(len(g.get('players', [])) for g in groups)
             lines = [f"🏌️ *{self.config.GROUP_NAME.upper()} TEE SHEET (SWAPPED)* 🏌️\n"]
-            lines.append(f"📅 {datetime.now().strftime('%d/%m/%Y')}\n")
+            lines.append(f"{self.tee_generator._format_date_lines()}\n")
             lines.append(f"👥 {total_players} players, {len(groups)} groups\n")
             lines.append(f"🔄 Swapped: {player1} ↔ {player2}\n")
 
@@ -2928,7 +2941,7 @@ class SwindleBot:
             # Rebuild tee sheet text
             total_players = sum(len(g.get('players', [])) for g in groups)
             lines = [f"🏌️ *{self.config.GROUP_NAME.upper()} TEE SHEET (UPDATED)* 🏌️\n"]
-            lines.append(f"📅 {datetime.now().strftime('%d/%m/%Y')}\n")
+            lines.append(f"{self.tee_generator._format_date_lines()}\n")
             lines.append(f"👥 {total_players} players, {len(groups)} groups\n")
             lines.append(f"➡️ Moved: {player_name} → Group {target_group}\n")
 
