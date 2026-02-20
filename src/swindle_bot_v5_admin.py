@@ -1580,6 +1580,31 @@ class TeeSheetGenerator:
         avoidances = avoidances or {}
         available_tee_times = available_tee_times or self.config.TEE_TIMES
 
+        # Make partner preferences bidirectional
+        # If Lloyd→Segan is set, also create Segan→Lloyd so it works regardless of processing order
+        bidirectional_prefs = {}
+        for player, partners in partner_prefs.items():
+            if player not in bidirectional_prefs:
+                bidirectional_prefs[player] = []
+            for p in partners:
+                if p not in bidirectional_prefs[player]:
+                    bidirectional_prefs[player].append(p)
+                if p not in bidirectional_prefs:
+                    bidirectional_prefs[p] = []
+                if player not in bidirectional_prefs[p]:
+                    bidirectional_prefs[p].append(player)
+        partner_prefs = bidirectional_prefs
+
+        # Build time preference map early (needed during grouping, not just time assignment)
+        player_prefs_map = {}
+        for p in participants:
+            if p.get('preferences'):
+                pref_text = p['preferences'].lower()
+                if 'early' in pref_text:
+                    player_prefs_map[p['name']] = 'early'
+                elif 'late' in pref_text:
+                    player_prefs_map[p['name']] = 'late'
+
         # Build player groups (host + their guests together)
         player_groups = []
         for p in participants:
@@ -1593,6 +1618,14 @@ class TeeSheetGenerator:
 
         if total_players == 0:
             return "No participants yet.", []
+
+        # Sort player_groups: players with partner preferences first (so they pair up
+        # before other players fill the groups), then by group size descending (larger
+        # blocks like host+guest are harder to place, so they go first)
+        player_groups.sort(key=lambda g: (
+            0 if g[0]['name'] in partner_prefs else 1,  # preferences first
+            -len(g)  # larger blocks first
+        ))
 
         # Distribute into tee time groups with constraint awareness
         # PRIORITY: Fill groups to MAX_GROUP_SIZE to minimize tee times
@@ -1615,16 +1648,19 @@ class TeeSheetGenerator:
             group_names = get_player_names(tee_group)
             return not any(has_avoidance(host_name, name) for name in group_names)
 
-        # First pass: Build groups with partner preferences
+        # First pass: Build groups ONLY for players with partner preferences
+        # Everyone else goes to pass 2 where time-preference-aware filling happens
         for player_group in player_groups:
             host_name = player_group[0]['name']
             if host_name in used_players:
                 continue
+            if host_name not in partner_prefs:
+                continue  # Leave for pass 2
 
             current_group = player_group.copy()
             used_players.add(host_name)
 
-            # Add preferred partners if possible
+            # Add preferred partners
             if host_name in partner_prefs:
                 for pref_partner in partner_prefs[host_name]:
                     if pref_partner in used_players:
@@ -1640,14 +1676,32 @@ class TeeSheetGenerator:
             tee_groups.append(current_group)
 
         # Second pass: Fill existing groups before creating new ones
+        # Process players with time preferences first so they can find matching groups
         remaining = [g for g in player_groups if g[0]['name'] not in used_players]
+        remaining.sort(key=lambda g: (
+            0 if player_prefs_map.get(g[0]['name']) else 1,  # time-pref players first
+            -len(g)  # larger blocks first
+        ))
 
         for player_group in remaining:
             host_name = player_group[0]['name']
             placed = False
+            host_time_pref = player_prefs_map.get(host_name)
 
-            # Try to fill smallest groups first (to balance group sizes)
-            for tee_group in sorted(tee_groups, key=len):
+            # Sort target groups: prefer matching time preference, then smallest
+            def group_fill_priority(tee_group):
+                group_hosts = get_player_names(tee_group)
+                if host_time_pref:
+                    # Late/early player: prefer groups with matching preference
+                    has_match = any(player_prefs_map.get(n) == host_time_pref for n in group_hosts)
+                    return (0 if has_match else 1, len(tee_group))
+                else:
+                    # Neutral player: prefer groups WITHOUT time preferences
+                    # (don't fill up a group that late/early players want to join)
+                    has_any_pref = any(player_prefs_map.get(n) for n in group_hosts)
+                    return (1 if has_any_pref else 0, len(tee_group))
+
+            for tee_group in sorted(tee_groups, key=group_fill_priority):
                 if can_add_to_group(player_group, tee_group):
                     tee_group.extend(player_group)
                     used_players.add(host_name)
@@ -1727,7 +1781,7 @@ class TeeSheetGenerator:
         # Tee times are pre-booked - we MUST fit within available slots, never TBC
         max_slots = len(available_tee_times)
         if len(tee_groups) > max_slots:
-            # Helper: extract host+guest blocks from a list of groups
+            # Helper: extract host+guest blocks from groups, merging preference-linked blocks
             def extract_blocks(groups):
                 blks = []
                 for grp in groups:
@@ -1738,6 +1792,27 @@ class TeeSheetGenerator:
                             blk = [p for p in grp if p['name'] == h_name or p.get('brought_by') == h_name]
                             blks.append(blk)
                             seen.add(h_name)
+
+                # Merge blocks whose players have partner preferences with each other
+                # so they stay together during repacking (e.g. Lloyd + Segan+Guest = one block)
+                merged = True
+                while merged:
+                    merged = False
+                    for i in range(len(blks)):
+                        if merged:
+                            break
+                        for j in range(i + 1, len(blks)):
+                            hosts_i = [p['name'] for p in blks[i] if not p.get('is_guest')]
+                            hosts_j = [p['name'] for p in blks[j] if not p.get('is_guest')]
+                            linked = any(
+                                hj in partner_prefs.get(hi, [])
+                                for hi in hosts_i for hj in hosts_j
+                            )
+                            if linked and len(blks[i]) + len(blks[j]) <= self.config.MAX_GROUP_SIZE:
+                                blks[i].extend(blks[j])
+                                blks.pop(j)
+                                merged = True
+                                break
                 return blks
 
             # Helper: score how constraint-free a group is (higher = better to break apart)
@@ -1817,17 +1892,7 @@ class TeeSheetGenerator:
             else:
                 print(f"⚠️  Cannot fit all players into {max_slots} tee times - capacity exceeded")
 
-        # Assign tee times based on preferences
-        # Parse player preferences from participants
-        player_prefs_map = {}
-        for p in participants:
-            if p.get('preferences'):
-                pref_text = p['preferences'].lower()
-                if 'early' in pref_text:
-                    player_prefs_map[p['name']] = 'early'
-                elif 'late' in pref_text:
-                    player_prefs_map[p['name']] = 'late'
-
+        # Assign tee times based on preferences (player_prefs_map built earlier)
         # Categorize groups by preference
         early_groups = []
         late_groups = []
@@ -2100,6 +2165,12 @@ class SwindleBot:
         """Check if a message looks like a bot response rather than an admin command"""
         # Multi-line or long messages are always bot responses
         if '\n' in text.strip() or len(text.strip()) > 150:
+            return True
+        # Messages starting with bot emoji prefixes are always bot responses
+        # Admin commands are plain text, bot responses use emoji indicators
+        stripped = text.strip()
+        bot_emojis = ['✅', '❌', '⚠️', '🏌', '📅', '⏰', '👥', '📋', '⚙️', '🔄']
+        if any(stripped.startswith(e) for e in bot_emojis):
             return True
         # Check cleaned text against blocklist
         cleaned = self._clean_for_compare(text)
