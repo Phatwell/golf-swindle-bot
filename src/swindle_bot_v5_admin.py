@@ -5,6 +5,7 @@ Simpler, more robust, powered by Claude AI
 """
 
 import os
+import random
 import sqlite3
 import subprocess
 import time
@@ -263,6 +264,9 @@ class Database:
             # Build set of AI-found player names
             ai_names = {p['name'] for p in players}
 
+            # Build map of existing preferences so admin-set ones aren't lost
+            existing_prefs = {row[0]: row[4] for row in existing_rows if row[4]}
+
             # Assign signup_order: existing players keep theirs, new players get next available
             ordered_players = []
             for player in players:
@@ -280,6 +284,10 @@ class Database:
                         if g not in ai_guests:
                             ai_guests.append(g)
                     player['guests'] = ai_guests
+                # Preserve existing preference if AI didn't find one
+                # (admin-set preferences like "late" shouldn't be wiped by re-analysis)
+                if not player.get('preferences') and name in existing_prefs:
+                    player['preferences'] = existing_prefs[name]
                 ordered_players.append((player, order, 0))
 
             # Preserve manually-added players that AI didn't find
@@ -891,17 +899,22 @@ class Database:
             'tee_sheet_text': tee_sheet_text
         }
         for group in groups:
-            group_data = {
-                'tee_time': assigned_times.get(id(group), 'TBC'),
-                'players': []
-            }
-            for player in group:
-                group_data['players'].append({
-                    'name': player['name'],
-                    'is_guest': player.get('is_guest', False),
-                    'brought_by': player.get('brought_by')
-                })
-            sheet_data['groups'].append(group_data)
+            if isinstance(group, dict):
+                # Already serialized (from swap/move on published sheet)
+                sheet_data['groups'].append(group)
+            else:
+                # Raw format (list of player dicts from generate())
+                group_data = {
+                    'tee_time': assigned_times.get(id(group), 'TBC'),
+                    'players': []
+                }
+                for player in group:
+                    group_data['players'].append({
+                        'name': player['name'],
+                        'is_guest': player.get('is_guest', False),
+                        'brought_by': player.get('brought_by')
+                    })
+                sheet_data['groups'].append(group_data)
 
         conn = self._connect()
         try:
@@ -1037,7 +1050,7 @@ RULES:
 12. NAME RESOLUTION: If someone is signed up by nickname (e.g. "ken") and later a matching person sends their own message (e.g. [KennyD]), use the [SenderName] as the canonical name. Similarly, use full names from recap messages when available (e.g. recap says "Mitchell Pettengell" for "mitch").
 13. Note early/late or specific tee time preferences if mentioned. Attribute preferences to the person who SAID them, not to a quoted person.
 14. MP/Match Play pairings: When someone says "me and [Name] for MP" or similar, both are playing AND want to be paired together. Add to "pairings" array as [sender, named_player].
-15. RECAP MESSAGES: The organizer may post a list of names as a recap/roll call. ALL names in this list are confirmed players. Anyone listed who hasn't sent their own message should still be added (e.g. "Scotty" in a recap = Scotty is playing). If the organizer listed themselves, they are also playing.
+15. RECAP MESSAGES (overrides Rule 1 for names): The organizer may post a numbered or bulleted list of names as a recap/roll call. ALL names in this recap are confirmed players even if they never sent a message themselves. This OVERRIDES Rule 1 - use the name from the recap as their player name. Examples: If recap lists "Scotty (+1)" = Scotty is playing with a guest (Scotty-Guest). If recap lists "Ricky Parkhurst" but no [Ricky Parkhurst] message exists = Ricky Parkhurst is still a confirmed player. You MUST include every single name from the recap list.
 16. CRITICAL: Return players in the ORDER they first signed up (earliest message = first in list). This order determines who gets a playing spot vs goes on the reserves list."""
 
         user_prompt = f"""MESSAGES:
@@ -1051,7 +1064,7 @@ Return ONLY valid JSON:
             response = self.client.messages.create(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=4000,
-                temperature=0,
+                temperature=0.1,
                 system=system_prompt,
                 messages=[{
                     "role": "user",
@@ -1116,7 +1129,7 @@ Return ONLY valid JSON:
             response = self.client.messages.create(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=1000,
-                temperature=0,
+                temperature=0.1,
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_prompt}]
             )
@@ -1179,7 +1192,7 @@ Return ONLY JSON: {{"command":"show_list|show_tee_sheet|add_player|remove_player
             response = self.client.messages.create(
                 model="claude-sonnet-4-5-20250929",
                 max_tokens=300,
-                temperature=0,
+                temperature=0.1,
                 system=admin_system,
                 messages=[{"role": "user", "content": admin_user_prompt}]
             )
@@ -1677,11 +1690,13 @@ class TeeSheetGenerator:
 
         # Second pass: Fill existing groups before creating new ones
         # Process players with time preferences first so they can find matching groups
+        # Shuffle neutral players for randomization (time-pref players stay ordered)
         remaining = [g for g in player_groups if g[0]['name'] not in used_players]
-        remaining.sort(key=lambda g: (
-            0 if player_prefs_map.get(g[0]['name']) else 1,  # time-pref players first
-            -len(g)  # larger blocks first
-        ))
+        pref_remaining = [g for g in remaining if player_prefs_map.get(g[0]['name'])]
+        neutral_remaining = [g for g in remaining if not player_prefs_map.get(g[0]['name'])]
+        pref_remaining.sort(key=lambda g: -len(g))
+        random.shuffle(neutral_remaining)
+        remaining = pref_remaining + neutral_remaining
 
         for player_group in remaining:
             host_name = player_group[0]['name']
@@ -1689,17 +1704,18 @@ class TeeSheetGenerator:
             host_time_pref = player_prefs_map.get(host_name)
 
             # Sort target groups: prefer matching time preference, then smallest
+            # Random tiebreaker so equal-priority groups get shuffled
             def group_fill_priority(tee_group):
                 group_hosts = get_player_names(tee_group)
                 if host_time_pref:
                     # Late/early player: prefer groups with matching preference
                     has_match = any(player_prefs_map.get(n) == host_time_pref for n in group_hosts)
-                    return (0 if has_match else 1, len(tee_group))
+                    return (0 if has_match else 1, len(tee_group), random.random())
                 else:
                     # Neutral player: prefer groups WITHOUT time preferences
                     # (don't fill up a group that late/early players want to join)
                     has_any_pref = any(player_prefs_map.get(n) for n in group_hosts)
-                    return (1 if has_any_pref else 0, len(tee_group))
+                    return (1 if has_any_pref else 0, len(tee_group), random.random())
 
             for tee_group in sorted(tee_groups, key=group_fill_priority):
                 if can_add_to_group(player_group, tee_group):
@@ -1992,7 +2008,7 @@ class TeeSheetGenerator:
 
         if not dropped and not new_players:
             # No changes - return original sheet
-            return published_sheet.get('tee_sheet_text', ''), False
+            return published_sheet.get('tee_sheet_text', ''), False, None
 
         # Remove dropped players from their groups
         for group in groups:
@@ -2101,7 +2117,7 @@ class TeeSheetGenerator:
                 else:
                     lines.append(f"  • {player['name']}")
 
-        return '\n'.join(lines), True
+        return '\n'.join(lines), True, groups
 
 
 # ==================== MAIN BOT ====================
@@ -2236,25 +2252,27 @@ class SwindleBot:
             if published:
                 # Published sheet exists - minimally adjust it
                 avoidances = self.db.get_avoidances()
-                tee_sheet, had_changes = self.tee_generator.adjust_tee_sheet(
+                tee_sheet, had_changes, adjusted_groups = self.tee_generator.adjust_tee_sheet(
                     published, participants, avoidances
                 )
                 if had_changes:
+                    self.db.save_published_tee_sheet(adjusted_groups, {}, tee_sheet)
                     self.send_to_admin_group(tee_sheet)
-                    print(f"   ✅ Sent adjusted tee sheet (minimal changes from published)")
+                    print(f"   ✅ Sent adjusted tee sheet (minimal changes from published, saved)")
                 else:
                     self.send_to_admin_group(published.get('tee_sheet_text', tee_sheet))
                     print(f"   ✅ Sent published tee sheet (no changes)")
             else:
-                # No published sheet - generate fresh
+                # No published sheet - generate fresh and save as published
                 partner_prefs = self.db.get_partner_preferences()
                 avoidances = self.db.get_avoidances()
                 available_times = self.db.generate_tee_times()
-                tee_sheet, _, _ = self.tee_generator.generate(
+                tee_sheet, groups, assigned_times = self.tee_generator.generate(
                     participants, partner_prefs, avoidances, available_times
                 )
+                self.db.save_published_tee_sheet(groups, assigned_times, tee_sheet)
                 self.send_to_admin_group(tee_sheet)
-                print(f"   ✅ Sent fresh tee sheet (no published version)")
+                print(f"   ✅ Sent fresh tee sheet (saved as published)")
 
         elif command == 'add_player':
             # Manually add a player
@@ -2724,7 +2742,7 @@ class SwindleBot:
 
             published = self.db.get_published_tee_sheet()
             if not published:
-                self.send_to_admin_group("❌ No published tee sheet to swap on. Use 'Show tee sheet' first then 'Randomize' to create one.")
+                self.send_to_admin_group("❌ No published tee sheet to swap on. Use 'Show tee sheet' first to generate one.")
                 print(f"   ❌ No published sheet")
                 return
 
@@ -2796,7 +2814,7 @@ class SwindleBot:
 
             published = self.db.get_published_tee_sheet()
             if not published:
-                self.send_to_admin_group("❌ No published tee sheet. Use 'Show tee sheet' first then 'Randomize' to create one.")
+                self.send_to_admin_group("❌ No published tee sheet. Use 'Show tee sheet' first to generate one.")
                 print(f"   ❌ No published sheet")
                 return
 
