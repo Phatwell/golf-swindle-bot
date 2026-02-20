@@ -1178,7 +1178,7 @@ class AdminCommandHandler:
 
         admin_system = """Parse golf admin commands into JSON. Extract exact names/values as written.
 
-Commands: show_list, show_tee_sheet, add_player(player_name), remove_player(player_name), add_guest(guest_name,host_name), remove_guest(guest_name), set_partner_preference(player_name,target_name), remove_partner_preference(player_name), set_avoidance(player_name,target_name), remove_avoidance(player_name), show_constraints, set_tee_times(start_time,interval_minutes,num_slots), show_tee_times, set_time_preference(player_name,time_preference=early|late), remove_time_preference(player_name), add_tee_time(tee_time), remove_tee_time(tee_time), clear_tee_times, clear_time_preferences, swap_players(player_name,target_name), move_player(player_name,group_number), randomize, unknown
+Commands: show_list, show_tee_sheet, add_player(player_name), remove_player(player_name), add_guest(guest_name,host_name), remove_guest(guest_name), set_partner_preference(player_name,target_name), remove_partner_preference(player_name), set_avoidance(player_name,target_name), remove_avoidance(player_name), show_constraints, set_tee_times(start_time,interval_minutes,num_slots), show_tee_times, set_time_preference(player_name,time_preference=early|late), remove_time_preference(player_name), add_tee_time(tee_time), remove_tee_time(tee_time), clear_tee_times, clear_time_preferences, clear_tee_sheet, swap_players(player_name,target_name), move_player(player_name,group_number), randomize, unknown
 
 swap_players: "swap X with Y", "switch X and Y" - swaps two players between their groups on the tee sheet
 move_player: "move X to group 3", "put X in group 2", "move X to the 3 ball" - moves a single player from their current group to a specified group number
@@ -1186,7 +1186,7 @@ randomize: "randomize", "shuffle", "reshuffle", "new tee sheet", "regenerate" - 
 
         admin_user_prompt = f"""COMMAND: "{message}"
 
-Return ONLY JSON: {{"command":"show_list|show_tee_sheet|add_player|remove_player|add_guest|remove_guest|set_partner_preference|remove_partner_preference|set_avoidance|remove_avoidance|show_constraints|set_tee_times|show_tee_times|set_time_preference|remove_time_preference|add_tee_time|remove_tee_time|clear_tee_times|clear_time_preferences|swap_players|move_player|randomize|unknown","confidence":"high|medium|low","params":{{}},"needs_response":true}}"""
+Return ONLY JSON: {{"command":"show_list|show_tee_sheet|add_player|remove_player|add_guest|remove_guest|set_partner_preference|remove_partner_preference|set_avoidance|remove_avoidance|show_constraints|set_tee_times|show_tee_times|set_time_preference|remove_time_preference|add_tee_time|remove_tee_time|clear_tee_times|clear_time_preferences|clear_tee_sheet|swap_players|move_player|randomize|unknown","confidence":"high|medium|low","params":{{}},"needs_response":true}}"""
 
         try:
             response = self.client.messages.create(
@@ -2213,6 +2213,21 @@ class SwindleBot:
             pass
         os.execv(sys.executable, [sys.executable] + sys.argv)
 
+    def auto_adjust_published_sheet(self):
+        """Auto-adjust published tee sheet if participants changed"""
+        published = self.db.get_published_tee_sheet()
+        if not published:
+            return
+        participants = self.db.get_participants(status_filter='playing')
+        avoidances = self.db.get_avoidances()
+        tee_sheet, had_changes, adjusted_groups = self.tee_generator.adjust_tee_sheet(
+            published, participants, avoidances
+        )
+        if had_changes:
+            self.db.save_published_tee_sheet(adjusted_groups, {}, tee_sheet)
+            self.send_to_admin_group(f"📢 *Tee sheet auto-updated:*\n\n{tee_sheet}")
+            print(f"   📢 Auto-adjusted published tee sheet")
+
     def handle_admin_command(self, command_text: str, sender: str):
         """Process and respond to admin command"""
         print(f"📱 Processing: '{command_text[:50]}...'")
@@ -2289,6 +2304,7 @@ class SwindleBot:
                 participant_list = self.generate_participant_list()
                 self.send_to_admin_group(f"✅ Added {player_name} (playing)\n\n{participant_list}")
                 print(f"   ✅ Added player: {player_name} (playing)")
+                self.auto_adjust_published_sheet()
             elif status == 'reserve':
                 reserves = self.db.get_participants(status_filter='reserve')
                 position = next((i+1 for i, r in enumerate(reserves) if r['name'] == player_name), len(reserves))
@@ -2324,6 +2340,7 @@ class SwindleBot:
                 print(f"   ✅ Removed player: {player_name}")
                 if result_info.get('promoted'):
                     print(f"   📢 Promoted from reserves: {result_info['promoted']}")
+                self.auto_adjust_published_sheet()
             else:
                 self.send_to_admin_group(f"❌ Player '{player_name}' not found")
                 print(f"   ⚠️  Player not found: {player_name}")
@@ -2351,6 +2368,7 @@ class SwindleBot:
                 print(f"   ✅ Added guest: {guest_name} for {host_name}")
                 if result_info.get('demoted'):
                     print(f"   ⚠️ Demoted to reserves: {result_info['demoted']}")
+                self.auto_adjust_published_sheet()
             else:
                 self.send_to_admin_group(f"❌ Failed to add guest. Host '{host_name}' not found?")
                 print(f"   ❌ Failed to add guest")
@@ -2379,6 +2397,7 @@ class SwindleBot:
                 print(f"   ✅ Removed guest: {guest_name}")
                 if result_info.get('promoted'):
                     print(f"   📢 Promoted from reserves: {result_info['promoted']}")
+                self.auto_adjust_published_sheet()
             else:
                 self.send_to_admin_group(f"❌ Guest '{guest_name}' not found")
                 print(f"   ⚠️  Guest not found: {guest_name}")
@@ -2776,6 +2795,17 @@ class SwindleBot:
             )
             print(f"   ✅ Cleared time preferences (kept {len(participants)} participants)")
 
+        elif command == 'clear_tee_sheet':
+            # Clear the published tee sheet
+            published = self.db.get_published_tee_sheet()
+            if published:
+                self.db.clear_published_tee_sheet()
+                self.send_to_admin_group("✅ Published tee sheet cleared. Use 'Show tee sheet' or 'Randomize' to generate a new one.")
+                print(f"   ✅ Cleared published tee sheet")
+            else:
+                self.send_to_admin_group("ℹ️ No published tee sheet to clear")
+                print(f"   ℹ️ No published tee sheet to clear")
+
         elif command == 'swap_players':
             # Swap two players between groups on the published tee sheet
             params = result.get('params', {})
@@ -3172,6 +3202,7 @@ class SwindleBot:
                         promoted_names = ', '.join(changes['promoted'])
                         self.send_to_admin_group(f"📢 Reserve promoted to playing: {promoted_names}")
                         print(f"   📢 Promoted from reserves: {changes['promoted']}")
+                    self.auto_adjust_published_sheet()
             else:
                 existing = self.db.get_participants()
                 if existing:
