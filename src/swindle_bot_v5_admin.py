@@ -1178,7 +1178,7 @@ class AdminCommandHandler:
 
         admin_system = """Parse golf admin commands into JSON. Extract exact names/values as written.
 
-Commands: show_list, show_tee_sheet, add_player(player_name), remove_player(player_name), add_guest(guest_name,host_name), remove_guest(guest_name), set_partner_preference(player_name,target_name), remove_partner_preference(player_name), set_avoidance(player_name,target_name), remove_avoidance(player_name), show_constraints, set_tee_times(start_time,interval_minutes,num_slots), show_tee_times, set_time_preference(player_name,time_preference=early|late), remove_time_preference(player_name), add_tee_time(tee_time), remove_tee_time(tee_time), clear_tee_times, clear_time_preferences, clear_tee_sheet, swap_players(player_name,target_name), move_player(player_name,group_number), randomize, unknown
+Commands: show_list, show_tee_sheet, add_player(player_name), remove_player(player_name), add_guest(guest_name,host_name), remove_guest(guest_name), set_partner_preference(player_name,target_name), remove_partner_preference(player_name), set_avoidance(player_name,target_name), remove_avoidance(player_name), show_constraints, set_tee_times(start_time,interval_minutes,num_slots), show_tee_times, set_time_preference(player_name,time_preference=early|late), remove_time_preference(player_name), add_tee_time(tee_time), remove_tee_time(tee_time), clear_tee_times, clear_time_preferences, clear_tee_sheet, clear_participants, swap_players(player_name,target_name), move_player(player_name,group_number), randomize, unknown
 
 swap_players: "swap X with Y", "switch X and Y" - swaps two players between their groups on the tee sheet
 move_player: "move X to group 3", "put X in group 2", "move X to the 3 ball" - moves a single player from their current group to a specified group number
@@ -1186,7 +1186,7 @@ randomize: "randomize", "shuffle", "reshuffle", "new tee sheet", "regenerate" - 
 
         admin_user_prompt = f"""COMMAND: "{message}"
 
-Return ONLY JSON: {{"command":"show_list|show_tee_sheet|add_player|remove_player|add_guest|remove_guest|set_partner_preference|remove_partner_preference|set_avoidance|remove_avoidance|show_constraints|set_tee_times|show_tee_times|set_time_preference|remove_time_preference|add_tee_time|remove_tee_time|clear_tee_times|clear_time_preferences|clear_tee_sheet|swap_players|move_player|randomize|unknown","confidence":"high|medium|low","params":{{}},"needs_response":true}}"""
+Return ONLY JSON: {{"command":"show_list|show_tee_sheet|add_player|remove_player|add_guest|remove_guest|set_partner_preference|remove_partner_preference|set_avoidance|remove_avoidance|show_constraints|set_tee_times|show_tee_times|set_time_preference|remove_time_preference|add_tee_time|remove_tee_time|clear_tee_times|clear_time_preferences|clear_tee_sheet|clear_participants|swap_players|move_player|randomize|unknown","confidence":"high|medium|low","params":{{}},"needs_response":true}}"""
 
         try:
             response = self.client.messages.create(
@@ -2818,6 +2818,17 @@ class SwindleBot:
             else:
                 self.send_to_admin_group("ℹ️ No published tee sheet to clear")
                 print(f"   ℹ️ No published tee sheet to clear")
+
+        elif command == 'clear_participants':
+            # Clear all participants and snapshot - forces fresh re-scan from main group
+            participants = self.db.get_participants()
+            count = len(participants)
+            self.db.clear_participants()
+            self.send_to_admin_group(
+                f"✅ Cleared {count} participants and message snapshot\n\n"
+                f"The bot will re-scan the main group on the next check and rebuild the list from scratch."
+            )
+            print(f"   ✅ Cleared {count} participants and snapshot")
 
         elif command == 'swap_players':
             # Swap two players between groups on the published tee sheet
