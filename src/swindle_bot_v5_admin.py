@@ -1178,7 +1178,7 @@ class AdminCommandHandler:
 
         admin_system = """Parse golf admin commands into JSON. Extract exact names/values as written.
 
-Commands: show_list, show_tee_sheet, add_player(player_name), remove_player(player_name), add_guest(guest_name,host_name), remove_guest(guest_name), set_partner_preference(player_name,target_name), remove_partner_preference(player_name), set_avoidance(player_name,target_name), remove_avoidance(player_name), show_constraints, set_tee_times(start_time,interval_minutes,num_slots), show_tee_times, set_time_preference(player_name,time_preference=early|late), add_tee_time(tee_time), remove_tee_time(tee_time), clear_tee_times, clear_time_preferences, swap_players(player_name,target_name), move_player(player_name,group_number), randomize, unknown
+Commands: show_list, show_tee_sheet, add_player(player_name), remove_player(player_name), add_guest(guest_name,host_name), remove_guest(guest_name), set_partner_preference(player_name,target_name), remove_partner_preference(player_name), set_avoidance(player_name,target_name), remove_avoidance(player_name), show_constraints, set_tee_times(start_time,interval_minutes,num_slots), show_tee_times, set_time_preference(player_name,time_preference=early|late), remove_time_preference(player_name), add_tee_time(tee_time), remove_tee_time(tee_time), clear_tee_times, clear_time_preferences, swap_players(player_name,target_name), move_player(player_name,group_number), randomize, unknown
 
 swap_players: "swap X with Y", "switch X and Y" - swaps two players between their groups on the tee sheet
 move_player: "move X to group 3", "put X in group 2", "move X to the 3 ball" - moves a single player from their current group to a specified group number
@@ -1186,7 +1186,7 @@ randomize: "randomize", "shuffle", "reshuffle", "new tee sheet", "regenerate" - 
 
         admin_user_prompt = f"""COMMAND: "{message}"
 
-Return ONLY JSON: {{"command":"show_list|show_tee_sheet|add_player|remove_player|add_guest|remove_guest|set_partner_preference|remove_partner_preference|set_avoidance|remove_avoidance|show_constraints|set_tee_times|show_tee_times|set_time_preference|add_tee_time|remove_tee_time|clear_tee_times|clear_time_preferences|swap_players|move_player|randomize|unknown","confidence":"high|medium|low","params":{{}},"needs_response":true}}"""
+Return ONLY JSON: {{"command":"show_list|show_tee_sheet|add_player|remove_player|add_guest|remove_guest|set_partner_preference|remove_partner_preference|set_avoidance|remove_avoidance|show_constraints|set_tee_times|show_tee_times|set_time_preference|remove_time_preference|add_tee_time|remove_tee_time|clear_tee_times|clear_time_preferences|swap_players|move_player|randomize|unknown","confidence":"high|medium|low","params":{{}},"needs_response":true}}"""
 
         try:
             response = self.client.messages.create(
@@ -2467,18 +2467,26 @@ class SwindleBot:
         elif command == 'show_constraints':
             # Show all constraints with active/inactive status
             constraints = self.db.get_constraints()
-            if not constraints:
-                self.send_to_admin_group("📋 *Constraints*\n\nNo constraints set")
-                print(f"   ℹ️  No constraints")
-                return
 
-            # Get current participant names for status check
+            # Get current participant names and time preferences
             participants = self.db.get_participants()
             signed_up = set()
+            time_prefs = []
             for p in participants:
                 signed_up.add(p['name'].lower())
                 for g in p.get('guests', []):
                     signed_up.add(g.lower())
+                if p.get('preferences'):
+                    pref_text = p['preferences'].lower()
+                    if 'early' in pref_text:
+                        time_prefs.append((p['name'], 'early'))
+                    elif 'late' in pref_text:
+                        time_prefs.append((p['name'], 'late'))
+
+            if not constraints and not time_prefs:
+                self.send_to_admin_group("📋 *Constraints*\n\nNo constraints set")
+                print(f"   ℹ️  No constraints")
+                return
 
             def player_status(player, target):
                 p_in = player.lower() in signed_up
@@ -2517,9 +2525,15 @@ class SwindleBot:
                 for c in avoidances:
                     status = player_status(c['player'], c['target'])
                     lines.append(f"  • {c['player']} avoids {c['target']}  {status}")
+                lines.append("")
+
+            if time_prefs:
+                lines.append("⏰ *Time Preferences:*")
+                for name, pref in time_prefs:
+                    lines.append(f"  • {name}: {pref}")
 
             self.send_to_admin_group('\n'.join(lines))
-            print(f"   ✅ Sent constraints list ({len(constraints)} constraints)")
+            print(f"   ✅ Sent constraints list ({len(constraints)} constraints, {len(time_prefs)} time prefs)")
 
         elif command == 'set_tee_times':
             # Configure tee time settings
@@ -2636,6 +2650,39 @@ class SwindleBot:
 
                     self.send_to_admin_group(f"✅ Set {player_name} preference to: {time_pref} tee time")
                     print(f"   ✅ Set {player_name} to {time_pref}")
+                    break
+
+            if not player_found:
+                self.send_to_admin_group(f"❌ Player '{player_name}' not found")
+                print(f"   ⚠️  Player not found")
+
+        elif command == 'remove_time_preference':
+            # Remove a single player's time preference (early/late)
+            params = result.get('params', {})
+            player_name = params.get('player_name')
+
+            if not player_name:
+                self.send_to_admin_group("❌ Error: Need player name")
+                print(f"   ❌ Missing player name")
+                return
+
+            participants = self.db.get_participants()
+            player_found = False
+            for p in participants:
+                if p['name'] == player_name:
+                    player_found = True
+                    current_pref = p.get('preferences') or ''
+                    cleaned = ' '.join([w for w in current_pref.split() if w.lower() not in ['early', 'late']])
+
+                    conn = sqlite3.connect(self.db.db_path, timeout=10)
+                    cursor = conn.cursor()
+                    cursor.execute("UPDATE participants SET preferences = ? WHERE name = ?",
+                                 (cleaned.strip() or None, player_name))
+                    conn.commit()
+                    conn.close()
+
+                    self.send_to_admin_group(f"✅ Removed time preference for {player_name}")
+                    print(f"   ✅ Removed time preference for {player_name}")
                     break
 
             if not player_found:
