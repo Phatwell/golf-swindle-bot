@@ -1069,7 +1069,7 @@ Return ONLY valid JSON:
 
         try:
             response = self.client.messages.create(
-                model="claude-haiku-4-5-20251001",
+                model="claude-sonnet-4-5-20250929",
                 max_tokens=4000,
                 temperature=0.1,
                 system=system_prompt,
@@ -1141,7 +1141,7 @@ Return ONLY valid JSON:
 
         try:
             response = self.client.messages.create(
-                model="claude-haiku-4-5-20251001",
+                model="claude-sonnet-4-5-20250929",
                 max_tokens=1000,
                 temperature=0.1,
                 system=system_prompt,
@@ -1204,7 +1204,7 @@ Return ONLY JSON: {{"command":"show_list|show_tee_sheet|add_player|remove_player
 
         try:
             response = self.client.messages.create(
-                model="claude-sonnet-4-5-20250929",
+                model="claude-haiku-4-5-20251001",
                 max_tokens=300,
                 temperature=0.1,
                 system=admin_system,
@@ -1393,7 +1393,7 @@ class WhatsAppBot:
             except:
                 pass
 
-    def get_all_messages(self, group_name: str) -> List[Dict]:
+    def get_all_messages(self, group_name: str, scroll_for_history: bool = False) -> List[Dict]:
         """Get ALL messages from the group (no filtering)"""
         try:
             time.sleep(3)
@@ -1517,37 +1517,6 @@ class WhatsAppBot:
                     pass
                 return None
 
-            # Find scroll container
-            scroll_container = None
-            try:
-                first_msg = self.driver.find_element(By.CSS_SELECTOR, '.message-in, .message-out')
-                scroll_container = self.driver.execute_script("""
-                    let el = arguments[0];
-                    while (el) {
-                        let style = getComputedStyle(el);
-                        let isScrollable = (style.overflowY === 'auto' || style.overflowY === 'scroll')
-                                           && el.scrollHeight > el.clientHeight;
-                        if (isScrollable && el.clientHeight > 200) {
-                            return el;
-                        }
-                        el = el.parentElement;
-                    }
-                    return null;
-                """, first_msg)
-                if not scroll_container:
-                    scroll_container = self.driver.execute_script("""
-                        let el = arguments[0];
-                        while (el) {
-                            if (el.scrollHeight > el.clientHeight && el.clientHeight > 200) {
-                                return el;
-                            }
-                            el = el.parentElement;
-                        }
-                        return null;
-                    """, first_msg)
-            except:
-                pass
-
             # Accumulate messages across scroll positions
             accumulated = {}  # key: (sender, text_first_80) -> message dict
 
@@ -1558,46 +1527,78 @@ class WhatsAppBot:
                     key = (msg['sender'], msg['text'][:80])
                     accumulated[key] = msg
 
-            # Scroll up and collect until we find "taking names" or exhaust scrolling
-            found_stop = False
-            if scroll_container:
-                no_new_count = 0
-                for scroll_i in range(MAX_SCROLL_ATTEMPTS):
-                    self.driver.execute_script(f"arguments[0].scrollBy(0, -{SCROLL_PIXELS});", scroll_container)
-                    time.sleep(1.5)
+            # Only scroll for main group (to find "taking names" and all signups)
+            if scroll_for_history:
+                scroll_container = None
+                try:
+                    first_msg = self.driver.find_element(By.CSS_SELECTOR, '.message-in, .message-out')
+                    scroll_container = self.driver.execute_script("""
+                        let el = arguments[0];
+                        while (el) {
+                            let style = getComputedStyle(el);
+                            let isScrollable = (style.overflowY === 'auto' || style.overflowY === 'scroll')
+                                               && el.scrollHeight > el.clientHeight;
+                            if (isScrollable && el.clientHeight > 200) {
+                                return el;
+                            }
+                            el = el.parentElement;
+                        }
+                        return null;
+                    """, first_msg)
+                    if not scroll_container:
+                        scroll_container = self.driver.execute_script("""
+                            let el = arguments[0];
+                            while (el) {
+                                if (el.scrollHeight > el.clientHeight && el.clientHeight > 200) {
+                                    return el;
+                                }
+                                el = el.parentElement;
+                            }
+                            return null;
+                        """, first_msg)
+                except:
+                    pass
 
-                    new_count = 0
-                    for elem in self.driver.find_elements(By.CSS_SELECTOR, '.message-in, .message-out'):
-                        msg = extract_message_from_element(elem)
-                        if msg:
-                            key = (msg['sender'], msg['text'][:80])
-                            if key not in accumulated:
-                                accumulated[key] = msg
-                                new_count += 1
+                # Scroll up and collect until we find "taking names" or exhaust scrolling
+                found_stop = False
+                if scroll_container:
+                    no_new_count = 0
+                    for scroll_i in range(MAX_SCROLL_ATTEMPTS):
+                        self.driver.execute_script(f"arguments[0].scrollBy(0, -{SCROLL_PIXELS});", scroll_container)
+                        time.sleep(1.5)
 
-                    # Check for stop phrase
-                    for key, msg in accumulated.items():
-                        text_lower = msg['text'].lower()
-                        if any(phrase in text_lower for phrase in STOP_PHRASES):
-                            found_stop = True
+                        new_count = 0
+                        for elem in self.driver.find_elements(By.CSS_SELECTOR, '.message-in, .message-out'):
+                            msg = extract_message_from_element(elem)
+                            if msg:
+                                key = (msg['sender'], msg['text'][:80])
+                                if key not in accumulated:
+                                    accumulated[key] = msg
+                                    new_count += 1
+
+                        # Check for stop phrase
+                        for key, msg in accumulated.items():
+                            text_lower = msg['text'].lower()
+                            if any(phrase in text_lower for phrase in STOP_PHRASES):
+                                found_stop = True
+                                break
+
+                        if found_stop:
+                            print(f"   Scrolled {scroll_i+1}x — found 'taking names' message, accumulated {len(accumulated)} messages")
                             break
 
-                    if found_stop:
-                        print(f"   Scrolled {scroll_i+1}x — found 'taking names' message, accumulated {len(accumulated)} messages")
-                        break
+                        if new_count == 0:
+                            no_new_count += 1
+                            if no_new_count >= 3:
+                                print(f"   Scrolled {scroll_i+1}x — reached top of history, accumulated {len(accumulated)} messages")
+                                break
+                        else:
+                            no_new_count = 0
 
-                    if new_count == 0:
-                        no_new_count += 1
-                        if no_new_count >= 3:
-                            print(f"   Scrolled {scroll_i+1}x — reached top of history, accumulated {len(accumulated)} messages")
-                            break
-                    else:
-                        no_new_count = 0
-
-                if not found_stop and no_new_count < 3:
-                    print(f"   Scrolled {MAX_SCROLL_ATTEMPTS}x (max), accumulated {len(accumulated)} messages")
-            else:
-                print(f"   ⚠️ No scroll container found, using {len(accumulated)} initial messages")
+                    if not found_stop and no_new_count < 3:
+                        print(f"   Scrolled {MAX_SCROLL_ATTEMPTS}x (max), accumulated {len(accumulated)} messages")
+                else:
+                    print(f"   ⚠️ No scroll container found, using {len(accumulated)} initial messages")
 
             # Convert accumulated dict to list, sorted by timestamp
             # data-pre-plain-text format: [HH:MM, DD/MM/YYYY] Name:
@@ -3291,7 +3292,7 @@ class SwindleBot:
             time.sleep(2)
             print("   ✅ WhatsApp reloaded")
 
-            messages = self.whatsapp.get_all_messages(self.config.GROUP_NAME)
+            messages = self.whatsapp.get_all_messages(self.config.GROUP_NAME, scroll_for_history=True)
             if messages is None:
                 print("⚠️  Failed to get main group messages - using existing data")
                 return
@@ -3468,7 +3469,7 @@ class SwindleBot:
 
                     if should_monitor_main:
                         print(f"\n📥 Fetching messages from {self.config.GROUP_NAME}...")
-                        messages = self.whatsapp.get_all_messages(self.config.GROUP_NAME)
+                        messages = self.whatsapp.get_all_messages(self.config.GROUP_NAME, scroll_for_history=True)
 
                         if messages is None:
                             consecutive_failures += 1
